@@ -1374,6 +1374,7 @@ func genVolFromVolumeOptions(
 	ctx context.Context,
 	volOptions map[string]string,
 	disableInUseChecks, checkClusterIDMapping bool,
+	topologyReq *csi.TopologyRequirement,
 ) (*rbdVolume, error) {
 	var (
 		ok         bool
@@ -1397,7 +1398,11 @@ func genVolFromVolumeOptions(
 
 	clusterID, err := util.GetClusterID(volOptions)
 	if err != nil {
-		return nil, err
+		// Fallback: try topology-based cluster selection
+		clusterID, err = util.GetClusterIDByTopology(volOptions, util.CsiConfigFile, topologyReq)
+		if err != nil {
+			return nil, err
+		}
 	}
 	rbdVol.Monitors, rbdVol.ClusterID, err = util.GetMonsAndClusterID(ctx, clusterID, checkClusterIDMapping)
 	if err != nil {

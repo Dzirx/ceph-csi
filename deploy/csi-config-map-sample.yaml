@@ -52,6 +52,16 @@ kind: ConfigMap
 # "read_from_replica=localize,crush_location=<label:value>" to the map option.
 # If a CSI plugin is using more than one Ceph cluster, repeat the section for
 # each such cluster in use.
+# The "topologyDomainLabels" is an optional field that maps Kubernetes
+# topology labels to values for topology-aware cluster selection.
+# When a StorageClass specifies "clusterIDs" (comma-separated list) instead
+# of a single "clusterID", the CSI driver will select the cluster whose
+# topologyDomainLabels match the node's topology zone.
+# This requires volumeBindingMode: WaitForFirstConsumer in the StorageClass.
+# Example:
+#   "topologyDomainLabels": {
+#     "topology.kubernetes.io/zone": "zone-a"
+#   }
 # NOTE: Changes to the configmap is automatically updated in the running pods,
 # thus restarting existing pods using the configmap is NOT required on edits
 # to the configmap.
@@ -68,6 +78,9 @@ data:
     [
       {
         "clusterID": "<cluster-id>",
+        "topologyDomainLabels": {
+          "<topology-label-key>": "<topology-label-value>"
+        },
         "rbd": {
            "netNamespaceFilePath": "<kubeletRootPath>/plugins/rbd.csi.ceph.com/net",
            "radosNamespace": "<rados-namespace>",

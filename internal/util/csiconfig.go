@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/ceph/ceph-csi/api/deploy/kubernetes"
+	"github.com/container-storage-interface/spec/lib/go/csi"
 )
 
 const (
@@ -40,6 +41,10 @@ const (
 
 	// ClusterIDKey is the name of the key containing clusterID.
 	ClusterIDKey = "clusterID"
+
+	// ClusterIDsKey is the name of the key containing a comma-separated list
+	// of clusterIDs for topology-aware cluster selection.
+	ClusterIDsKey = "clusterIDs"
 )
 
 // Expected JSON structure in the passed in config file is,
@@ -266,4 +271,118 @@ func GetCephFSControllerPublishSecretRef(pathToConfig, clusterID string) (string
 	secretRef := cluster.CephFS.ControllerPublishSecretRef
 
 	return secretRef.Name, secretRef.Namespace, nil
+}
+
+// readAllClusterInfos reads and returns all cluster entries from the config file.
+func readAllClusterInfos(pathToConfig string) ([]kubernetes.ClusterInfo, error) {
+	var config []kubernetes.ClusterInfo
+
+	// #nosec
+	content, err := os.ReadFile(pathToConfig)
+	if err != nil {
+		return nil, fmt.Errorf("error reading CSI config file %q: %w", pathToConfig, err)
+	}
+
+	err = json.Unmarshal(content, &config)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshal failed (%w), raw buffer response: %s",
+			err, string(content))
+	}
+
+	return config, nil
+}
+
+// matchClusterTopology checks if a cluster's TopologyDomainLabels match
+// the given topology segments. All labels defined in the cluster config
+// must be present and match in the topology segments.
+func matchClusterTopology(cluster *kubernetes.ClusterInfo, segments map[string]string) bool {
+	if len(cluster.TopologyDomainLabels) == 0 {
+		return false
+	}
+
+	for label, value := range cluster.TopologyDomainLabels {
+		segValue, ok := segments[label]
+		if !ok || segValue != value {
+			return false
+		}
+	}
+
+	return true
+}
+
+// FindClusterByTopology selects a cluster from the config file based on
+// topology requirements. It filters clusters by the given clusterIDs list
+// and matches their TopologyDomainLabels against the AccessibilityRequirements.
+// Preferred topologies are checked first, then requisite.
+func FindClusterByTopology(
+	pathToConfig string,
+	clusterIDs []string,
+	topologyReq *csi.TopologyRequirement,
+) (string, error) {
+	if topologyReq == nil {
+		return "", fmt.Errorf("topology requirements are nil, cannot select cluster")
+	}
+
+	allClusters, err := readAllClusterInfos(pathToConfig)
+	if err != nil {
+		return "", err
+	}
+
+	// build a set of allowed clusterIDs for fast lookup
+	allowed := make(map[string]bool, len(clusterIDs))
+	for _, id := range clusterIDs {
+		allowed[strings.TrimSpace(id)] = true
+	}
+
+	// filter clusters to only those in the allowed list
+	var candidates []kubernetes.ClusterInfo
+	for i := range allClusters {
+		if allowed[allClusters[i].ClusterID] {
+			candidates = append(candidates, allClusters[i])
+		}
+	}
+
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("none of the cluster IDs %v found in CSI config %q", clusterIDs, pathToConfig)
+	}
+
+	// check preferred topologies first
+	for _, topology := range topologyReq.GetPreferred() {
+		for i := range candidates {
+			if matchClusterTopology(&candidates[i], topology.GetSegments()) {
+				return candidates[i].ClusterID, nil
+			}
+		}
+	}
+
+	// fall back to requisite topologies
+	for _, topology := range topologyReq.GetRequisite() {
+		for i := range candidates {
+			if matchClusterTopology(&candidates[i], topology.GetSegments()) {
+				return candidates[i].ClusterID, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf(
+		"no cluster from %v matches the topology requirements (preferred: %v, requisite: %v)",
+		clusterIDs, topologyReq.GetPreferred(), topologyReq.GetRequisite())
+}
+
+// GetClusterIDByTopology checks if the options contain a "clusterIDs" parameter
+// and resolves the appropriate clusterID based on topology requirements.
+// Returns ErrClusterIDNotSet if "clusterIDs" is not present in the options.
+func GetClusterIDByTopology(
+	options map[string]string,
+	pathToConfig string,
+	topologyReq *csi.TopologyRequirement,
+) (string, error) {
+	clusterIDsStr, ok := options[ClusterIDsKey]
+	if !ok || clusterIDsStr == "" {
+		return "", ErrClusterIDNotSet
+	}
+
+	clusterIDs := strings.Split(clusterIDsStr, ",")
+
+	return FindClusterByTopology(pathToConfig, clusterIDs, topologyReq)
 }

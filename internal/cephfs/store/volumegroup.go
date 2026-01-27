@@ -45,7 +45,7 @@ func NewVolumeGroupOptions(
 	)
 
 	volOptions := req.GetParameters()
-	opts.VolumeOptions, err = getVolumeOptions(volOptions)
+	opts.VolumeOptions, err = getVolumeOptions(volOptions, nil)
 	if err != nil {
 		return nil, err
 	}

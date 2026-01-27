@@ -22,6 +22,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 
@@ -800,6 +802,216 @@ func TestGetCephFSControllerPublishSecretRef(t *testing.T) {
 			if tt.want.Name != secretName || tt.want.Namespace != secretNamespace {
 				t.Errorf("GetCephFSControllerPublishSecretRef() = (%v, %v), want (%v, %v)",
 					secretName, secretNamespace, tt.want.Name, tt.want.Namespace)
+			}
+		})
+	}
+}
+
+func TestFindClusterByTopology(t *testing.T) {
+	t.Parallel()
+
+	csiConfig := []cephcsi.ClusterInfo{
+		{
+			ClusterID: "cluster-poland",
+			Monitors:  []string{"10.0.1.1:6789"},
+			TopologyDomainLabels: map[string]string{
+				"topology.kubernetes.io/zone": "zone-poland",
+			},
+		},
+		{
+			ClusterID: "cluster-france",
+			Monitors:  []string{"10.0.2.1:6789"},
+			TopologyDomainLabels: map[string]string{
+				"topology.kubernetes.io/zone": "zone-france",
+			},
+		},
+		{
+			ClusterID: "cluster-no-topology",
+			Monitors:  []string{"10.0.3.1:6789"},
+		},
+	}
+	csiConfigFileContent, err := json.Marshal(csiConfig)
+	require.NoError(t, err)
+
+	tmpConfPath := t.TempDir() + "/ceph-csi.json"
+	err = os.WriteFile(tmpConfPath, csiConfigFileContent, 0o600)
+	require.NoError(t, err)
+
+	allIDs := []string{"cluster-poland", "cluster-france", "cluster-no-topology"}
+
+	tests := []struct {
+		name        string
+		clusterIDs  []string
+		topologyReq *csi.TopologyRequirement
+		wantID      string
+		wantErr     bool
+	}{
+		{
+			name:       "preferred topology matches zone-poland",
+			clusterIDs: allIDs,
+			topologyReq: &csi.TopologyRequirement{
+				Preferred: []*csi.Topology{
+					{Segments: map[string]string{"topology.kubernetes.io/zone": "zone-poland"}},
+				},
+			},
+			wantID: "cluster-poland",
+		},
+		{
+			name:       "preferred topology matches zone-france",
+			clusterIDs: allIDs,
+			topologyReq: &csi.TopologyRequirement{
+				Preferred: []*csi.Topology{
+					{Segments: map[string]string{"topology.kubernetes.io/zone": "zone-france"}},
+				},
+			},
+			wantID: "cluster-france",
+		},
+		{
+			name:       "requisite topology fallback",
+			clusterIDs: allIDs,
+			topologyReq: &csi.TopologyRequirement{
+				Preferred: []*csi.Topology{
+					{Segments: map[string]string{"topology.kubernetes.io/zone": "zone-unknown"}},
+				},
+				Requisite: []*csi.Topology{
+					{Segments: map[string]string{"topology.kubernetes.io/zone": "zone-france"}},
+				},
+			},
+			wantID: "cluster-france",
+		},
+		{
+			name:       "no matching topology",
+			clusterIDs: allIDs,
+			topologyReq: &csi.TopologyRequirement{
+				Preferred: []*csi.Topology{
+					{Segments: map[string]string{"topology.kubernetes.io/zone": "zone-unknown"}},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name:        "nil topology requirement",
+			clusterIDs:  allIDs,
+			topologyReq: nil,
+			wantErr:     true,
+		},
+		{
+			name:       "clusterIDs not in config",
+			clusterIDs: []string{"nonexistent-cluster"},
+			topologyReq: &csi.TopologyRequirement{
+				Preferred: []*csi.Topology{
+					{Segments: map[string]string{"topology.kubernetes.io/zone": "zone-poland"}},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name:       "subset of clusterIDs filters correctly",
+			clusterIDs: []string{"cluster-france"},
+			topologyReq: &csi.TopologyRequirement{
+				Preferred: []*csi.Topology{
+					{Segments: map[string]string{"topology.kubernetes.io/zone": "zone-poland"}},
+					{Segments: map[string]string{"topology.kubernetes.io/zone": "zone-france"}},
+				},
+			},
+			wantID: "cluster-france",
+		},
+		{
+			name:       "preferred order is respected",
+			clusterIDs: allIDs,
+			topologyReq: &csi.TopologyRequirement{
+				Preferred: []*csi.Topology{
+					{Segments: map[string]string{"topology.kubernetes.io/zone": "zone-france"}},
+					{Segments: map[string]string{"topology.kubernetes.io/zone": "zone-poland"}},
+				},
+			},
+			wantID: "cluster-france",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := FindClusterByTopology(tmpConfPath, tt.clusterIDs, tt.topologyReq)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.wantID, got)
+			}
+		})
+	}
+}
+
+func TestGetClusterIDByTopology(t *testing.T) {
+	t.Parallel()
+
+	csiConfig := []cephcsi.ClusterInfo{
+		{
+			ClusterID: "cluster-a",
+			Monitors:  []string{"10.0.1.1:6789"},
+			TopologyDomainLabels: map[string]string{
+				"topology.kubernetes.io/zone": "zone-a",
+			},
+		},
+		{
+			ClusterID: "cluster-b",
+			Monitors:  []string{"10.0.2.1:6789"},
+			TopologyDomainLabels: map[string]string{
+				"topology.kubernetes.io/zone": "zone-b",
+			},
+		},
+	}
+	csiConfigFileContent, err := json.Marshal(csiConfig)
+	require.NoError(t, err)
+
+	tmpConfPath := t.TempDir() + "/ceph-csi.json"
+	err = os.WriteFile(tmpConfPath, csiConfigFileContent, 0o600)
+	require.NoError(t, err)
+
+	topologyReq := &csi.TopologyRequirement{
+		Preferred: []*csi.Topology{
+			{Segments: map[string]string{"topology.kubernetes.io/zone": "zone-b"}},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		options map[string]string
+		wantID  string
+		wantErr bool
+	}{
+		{
+			name:    "clusterIDs present, topology matches",
+			options: map[string]string{"clusterIDs": "cluster-a,cluster-b"},
+			wantID:  "cluster-b",
+		},
+		{
+			name:    "clusterIDs with spaces",
+			options: map[string]string{"clusterIDs": "cluster-a, cluster-b"},
+			wantID:  "cluster-b",
+		},
+		{
+			name:    "clusterIDs not present",
+			options: map[string]string{"clusterID": "cluster-a"},
+			wantErr: true,
+		},
+		{
+			name:    "clusterIDs empty",
+			options: map[string]string{"clusterIDs": ""},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := GetClusterIDByTopology(tt.options, tmpConfPath, topologyReq)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.wantID, got)
 			}
 		})
 	}

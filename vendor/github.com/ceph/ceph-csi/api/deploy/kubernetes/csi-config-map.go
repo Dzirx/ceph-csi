@@ -23,6 +23,11 @@ import (
 type ClusterInfo struct {
 	// ClusterID is used for unique identification
 	ClusterID string `json:"clusterID"`
+	// TopologyDomainLabels maps Kubernetes topology labels to values,
+	// enabling topology-aware cluster selection. When set, the CSI driver
+	// can select this cluster based on the node's topology zone.
+	// Example: {"topology.kubernetes.io/zone": "zone-a"}
+	TopologyDomainLabels map[string]string `json:"topologyDomainLabels,omitempty"`
 	// Monitors is monitor list for corresponding cluster ID
 	Monitors []string `json:"monitors"`
 	// CephFS contains CephFS specific options

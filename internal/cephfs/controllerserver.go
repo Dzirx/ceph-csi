@@ -771,7 +771,7 @@ func (cs *ControllerServer) CreateSnapshot(
 	}
 	defer cr.DeleteCredentials()
 
-	clusterData, err := store.GetClusterInformation(req.GetParameters())
+	clusterData, err := store.GetClusterInformation(req.GetParameters(), nil)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}

@@ -273,7 +273,7 @@ func initStaticVol(
 		volID = volCtx["imageName"]
 	}
 
-	rv, err := genVolFromVolumeOptions(ctx, volCtx, disableInUseChecks, true)
+	rv, err := genVolFromVolumeOptions(ctx, volCtx, disableInUseChecks, true, nil)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}

@@ -184,16 +184,18 @@ func extractMounter(dest *string, options map[string]string) error {
 	return nil
 }
 
-func GetClusterInformation(options map[string]string) (*cephcsi.ClusterInfo, error) {
+func GetClusterInformation(
+	options map[string]string,
+	topologyReq *csi.TopologyRequirement,
+) (*cephcsi.ClusterInfo, error) {
 	clusterID, ok := options["clusterID"]
-	if !ok {
-		err := errors.New("clusterID must be set")
-
-		return nil, err
-	}
-
-	if err := validateNonEmptyField(clusterID, "clusterID"); err != nil {
-		return nil, err
+	if !ok || clusterID == "" {
+		// Fallback: try topology-based cluster selection
+		var err error
+		clusterID, err = util.GetClusterIDByTopology(options, util.CsiConfigFile, topologyReq)
+		if err != nil {
+			return nil, errors.New("clusterID must be set or clusterIDs with topology requirements must be provided")
+		}
 	}
 
 	monitors, err := util.Mons(util.CsiConfigFile, clusterID)
@@ -242,9 +244,9 @@ func fmtBackingSnapshotOptionMismatch(optName, expected, actual string) error {
 // - clusterID must be set
 // - monitors must be set
 // - fsName must be set.
-func getVolumeOptions(vo map[string]string) (*VolumeOptions, error) {
+func getVolumeOptions(vo map[string]string, topologyReq *csi.TopologyRequirement) (*VolumeOptions, error) {
 	opts := VolumeOptions{}
-	clusterData, err := GetClusterInformation(vo)
+	clusterData, err := GetClusterInformation(vo, topologyReq)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +280,7 @@ func NewVolumeOptions(
 	)
 
 	volOptions := req.GetParameters()
-	opts, err = getVolumeOptions(volOptions)
+	opts, err = getVolumeOptions(volOptions, req.GetAccessibilityRequirements())
 	if err != nil {
 		return nil, err
 	}
@@ -744,7 +746,7 @@ func NewVolumeOptionsFromStaticVolume(
 	// store NOT of static boolean
 	opts.ProvisionVolume = !staticVol
 
-	clusterData, err := GetClusterInformation(options)
+	clusterData, err := GetClusterInformation(options, nil)
 	if err != nil {
 		return nil, nil, err
 	}

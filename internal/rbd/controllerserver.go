@@ -82,7 +82,12 @@ func (cs *ControllerServer) validateVolumeReq(ctx context.Context, req *csi.Crea
 		return status.Error(codes.InvalidArgument, "volume Capabilities cannot be empty")
 	}
 	options := req.GetParameters()
-	if value, ok := options["clusterID"]; !ok || value == "" {
+	clusterIDVal, hasClusterID := options["clusterID"]
+	_, hasClusterIDs := options["clusterIDs"]
+	if !hasClusterID && !hasClusterIDs {
+		return status.Error(codes.InvalidArgument, "missing clusterID or clusterIDs to provision volume from")
+	}
+	if hasClusterID && clusterIDVal == "" {
 		return status.Error(codes.InvalidArgument, "empty cluster ID to provision volume from")
 	}
 	poolValue, poolOK := options["pool"]
@@ -186,7 +191,8 @@ func (cs *ControllerServer) parseVolCreateRequest(
 		ctx,
 		req.GetParameters(),
 		isMultiWriter && isBlock,
-		false)
+		false,
+		req.GetAccessibilityRequirements())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
