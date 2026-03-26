@@ -306,14 +306,6 @@ func (cs *ControllerServer) CreateVolume(
 	secret := req.GetSecrets()
 	requestName := req.GetName()
 
-	cr, err := util.NewAdminCredentials(secret)
-	if err != nil {
-		log.ErrorLog(ctx, "failed to retrieve admin credentials: %v", err)
-
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	defer cr.DeleteCredentials()
-
 	// Existence and conflict checks
 	if acquired := cs.VolumeLocks.TryAcquire(requestName); !acquired {
 		log.ErrorLog(ctx, util.VolumeOperationAlreadyExistsFmt, requestName)
@@ -322,12 +314,30 @@ func (cs *ControllerServer) CreateVolume(
 	}
 	defer cs.VolumeLocks.Release(requestName)
 
-	volOptions, err := store.NewVolumeOptions(ctx, requestName, cs.ClusterName, cs.SetMetadata, req, cr)
+	var (
+		cr         *util.Credentials
+		volOptions *store.VolumeOptions
+		err        error
+	)
+
+	if _, hasClusterIDs := req.GetParameters()[util.ClusterIDsKey]; hasClusterIDs {
+		// Topology-aware path: resolve clusterID first, then filter per-cluster credentials.
+		volOptions, cr, err = store.NewVolumeOptionsWithSecrets(ctx, requestName, cs.ClusterName, cs.SetMetadata, req, secret)
+	} else {
+		// Standard path: credentials created upfront.
+		cr, err = util.NewAdminCredentials(secret)
+		if err != nil {
+			log.ErrorLog(ctx, "failed to retrieve admin credentials: %v", err)
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		volOptions, err = store.NewVolumeOptions(ctx, requestName, cs.ClusterName, cs.SetMetadata, req, cr)
+	}
 	if err != nil {
 		log.ErrorLog(ctx, "validation and extraction of volume options failed: %v", err)
 
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	defer cr.DeleteCredentials()
 	defer volOptions.Destroy()
 
 	if req.GetCapacityRange() != nil {

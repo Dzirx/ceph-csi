@@ -18,6 +18,8 @@ package rbd
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestValidateStriping(t *testing.T) {
@@ -91,9 +93,10 @@ func TestValidateStriping(t *testing.T) {
 func TestToCSIVolume(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		rv      *rbdVolume
-		wantErr bool
+		name         string
+		rv           *rbdVolume
+		wantErr      bool
+		wantTopology map[string]string
 	}{
 		{
 			name: "all attributes set",
@@ -104,6 +107,24 @@ func TestToCSIVolume(t *testing.T) {
 					JournalPool:  "replicapool",
 					RbdImageName: "csi-vol-01234-5678-90abc",
 				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "topology is serialized into accessible topology",
+			rv: &rbdVolume{
+				rbdImage: rbdImage{
+					VolID:        "0001-unique-volume-id",
+					Pool:         "ecpool",
+					JournalPool:  "replicapool",
+					RbdImageName: "csi-vol-01234-5678-90abc",
+				},
+				Topology: map[string]string{
+					"topology.kubernetes.io/zone": "zone-a",
+				},
+			},
+			wantTopology: map[string]string{
+				"topology.kubernetes.io/zone": "zone-a",
 			},
 			wantErr: false,
 		},
@@ -159,9 +180,24 @@ func TestToCSIVolume(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := tt.rv.ToCSI(t.Context()); (err != nil) != tt.wantErr {
+			vol, err := tt.rv.ToCSI(t.Context())
+			if (err != nil) != tt.wantErr {
 				t.Errorf("ToCSI() error = %v, wantErr %v", err, tt.wantErr)
+
+				return
 			}
+			if err != nil {
+				return
+			}
+
+			if tt.wantTopology == nil {
+				require.Nil(t, vol.AccessibleTopology)
+
+				return
+			}
+
+			require.Len(t, vol.AccessibleTopology, 1)
+			require.Equal(t, tt.wantTopology, vol.AccessibleTopology[0].Segments)
 		})
 	}
 }

@@ -188,6 +188,8 @@ func GetClusterInformation(
 	options map[string]string,
 	topologyReq *csi.TopologyRequirement,
 ) (*cephcsi.ClusterInfo, error) {
+	selectedByTopology := false
+
 	clusterID, ok := options["clusterID"]
 	if !ok || clusterID == "" {
 		// Fallback: try topology-based cluster selection
@@ -196,6 +198,8 @@ func GetClusterInformation(
 		if err != nil {
 			return nil, errors.New("clusterID must be set or clusterIDs with topology requirements must be provided")
 		}
+
+		selectedByTopology = true
 	}
 
 	monitors, err := util.Mons(util.CsiConfigFile, clusterID)
@@ -224,6 +228,12 @@ func GetClusterInformation(
 	}
 	clusterData.CephFS.SubvolumeGroup = subvolumeGroup
 	clusterData.CephFS.RadosNamespace = radosNamespace
+	if selectedByTopology {
+		clusterData.TopologyDomainLabels, err = util.GetClusterTopologyDomainLabels(util.CsiConfigFile, clusterID)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	return clusterData, nil
 }
@@ -255,6 +265,7 @@ func getVolumeOptions(vo map[string]string, topologyReq *csi.TopologyRequirement
 	opts.Monitors = strings.Join(clusterData.Monitors, ",")
 	opts.SubvolumeGroup = clusterData.CephFS.SubvolumeGroup
 	opts.RadosNamespace = clusterData.CephFS.RadosNamespace
+	opts.Topology = clusterData.TopologyDomainLabels
 
 	if err = extractOption(&opts.FsName, "fsName", vo); err != nil {
 		return nil, err
@@ -371,6 +382,41 @@ func NewVolumeOptions(
 	return opts, nil
 }
 
+// NewVolumeOptionsWithSecrets is like NewVolumeOptions but accepts raw secrets
+// instead of pre-built Credentials. It resolves the clusterID first, then
+// filters per-cluster credentials from the secret using FilterSecretsForCluster,
+// and returns the resulting Credentials alongside VolumeOptions.
+// Use this instead of NewVolumeOptions when topology-aware cluster selection
+// is needed (i.e. StorageClass uses clusterIDs instead of clusterID).
+func NewVolumeOptionsWithSecrets(
+	ctx context.Context,
+	requestName,
+	clusterName string,
+	setMetadata bool,
+	req *csi.CreateVolumeRequest,
+	secrets map[string]string,
+) (*VolumeOptions, *util.Credentials, error) {
+	volOptions := req.GetParameters()
+
+	opts, err := getVolumeOptions(volOptions, req.GetAccessibilityRequirements())
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cr, err := util.NewAdminCredentials(util.FilterSecretsForCluster(secrets, opts.ClusterID))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	volOpts, err := NewVolumeOptions(ctx, requestName, clusterName, setMetadata, req, cr)
+	if err != nil {
+		cr.DeleteCredentials()
+		return nil, nil, err
+	}
+
+	return volOpts, cr, nil
+}
+
 // IsShallowVolumeSupported returns true only for ReadOnly volume requests
 // with datasource as snapshot.
 func IsShallowVolumeSupported(req *csi.CreateVolumeRequest) bool {
@@ -435,7 +481,7 @@ func NewVolumeOptionsFromVolID(
 		return nil, nil, fmt.Errorf("failed to fetch rados namespace using clusterID (%s): %w", vi.ClusterID, err)
 	}
 
-	cr, err := util.NewAdminCredentials(secrets)
+	cr, err := util.NewAdminCredentials(util.FilterSecretsForCluster(secrets, vi.ClusterID))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -701,7 +747,7 @@ func NewVolumeOptionsFromMonitorList(
 		opts.BackingSnapshot = true
 	}
 
-	cr, err := util.NewAdminCredentials(secrets)
+	cr, err := util.NewAdminCredentials(util.FilterSecretsForCluster(secrets, opts.ClusterID))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -791,7 +837,7 @@ func NewVolumeOptionsFromStaticVolume(
 		opts.BackingSnapshot = true
 	}
 
-	cr, err := util.NewAdminCredentials(secrets)
+	cr, err := util.NewAdminCredentials(util.FilterSecretsForCluster(secrets, opts.ClusterID))
 	if err != nil {
 		return nil, nil, err
 	}

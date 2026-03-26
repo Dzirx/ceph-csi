@@ -1016,3 +1016,53 @@ func TestGetClusterIDByTopology(t *testing.T) {
 		})
 	}
 }
+
+func TestGetClusterTopologyDomainLabels(t *testing.T) {
+	t.Parallel()
+
+	csiConfig := []cephcsi.ClusterInfo{
+		{
+			ClusterID: "cluster-a",
+			Monitors:  []string{"10.0.1.1:6789"},
+			TopologyDomainLabels: map[string]string{
+				"topology.kubernetes.io/zone":   "zone-a",
+				"topology.kubernetes.io/region": "region-a",
+			},
+		},
+		{
+			ClusterID: "cluster-b",
+			Monitors:  []string{"10.0.2.1:6789"},
+		},
+	}
+	csiConfigFileContent, err := json.Marshal(csiConfig)
+	require.NoError(t, err)
+
+	tmpConfPath := t.TempDir() + "/ceph-csi.json"
+	err = os.WriteFile(tmpConfPath, csiConfigFileContent, 0o600)
+	require.NoError(t, err)
+
+	t.Run("returns a copy of topology labels", func(t *testing.T) {
+		t.Parallel()
+
+		topology, getErr := GetClusterTopologyDomainLabels(tmpConfPath, "cluster-a")
+		require.NoError(t, getErr)
+		assert.Equal(t, map[string]string{
+			"topology.kubernetes.io/zone":   "zone-a",
+			"topology.kubernetes.io/region": "region-a",
+		}, topology)
+
+		topology["topology.kubernetes.io/zone"] = "mutated"
+
+		reloaded, reloadErr := GetClusterTopologyDomainLabels(tmpConfPath, "cluster-a")
+		require.NoError(t, reloadErr)
+		assert.Equal(t, "zone-a", reloaded["topology.kubernetes.io/zone"])
+	})
+
+	t.Run("returns nil when cluster has no topology labels", func(t *testing.T) {
+		t.Parallel()
+
+		topology, getErr := GetClusterTopologyDomainLabels(tmpConfPath, "cluster-b")
+		require.NoError(t, getErr)
+		assert.Nil(t, topology)
+	})
+}

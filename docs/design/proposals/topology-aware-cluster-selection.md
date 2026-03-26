@@ -25,7 +25,8 @@ topology zone, using two new configuration mechanisms:
    with Kubernetes topology labels (e.g. zone).
 2. **`clusterIDs`** StorageClass parameter — a comma-separated list of
    candidate cluster IDs. The driver selects the one matching the volume's
-   topology requirements.
+   topology requirements and returns the selected cluster topology in
+   `Volume.AccessibleTopology`.
 
 ### Design Principles
 
@@ -87,6 +88,29 @@ volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Delete
 ```
 
+#### Secret
+
+When `clusterIDs` is used, the provisioner Secret may carry both the standard
+credentials and per-cluster overrides. If keys named
+`<clusterID>.userID` and `<clusterID>.userKey` are present, Ceph-CSI uses
+them for the cluster selected during `CreateVolume`. Otherwise it falls back
+to the plain `userID` and `userKey` entries.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: csi-cephfs-secret
+  namespace: ceph-system
+stringData:
+  userID: admin
+  userKey: AQDefaultKey==
+  cluster-poland.userID: admin-lublin
+  cluster-poland.userKey: AQLublinKey==
+  cluster-france.userID: admin-ovh
+  cluster-france.userKey: AQOvhKey==
+```
+
 ### Request Flow
 
 ```
@@ -118,6 +142,10 @@ GetClusterIDByTopology(options, configPath, topologyReq)
         ▼
   Continue with selected clusterID
   (monitors, pools, OMAP — all resolved as usual)
+        │
+        ▼
+  Copy selected cluster's TopologyDomainLabels
+  into Volume.AccessibleTopology
 ```
 
 ### Topology Matching Algorithm
@@ -152,13 +180,20 @@ When a pod is scheduled on a node in `zone-poland`, the following happens:
 5. The selected `clusterID` (`cluster-poland`) is used to resolve monitors
    from `config.json` — the driver connects to the Ceph cluster in Poland.
 6. The **RBD image (or CephFS subvolume) is created in that cluster**.
-7. The selected `clusterID` is encoded into the `volumeHandle`, so all
+7. The driver copies the selected cluster's `TopologyDomainLabels` into
+   `Volume.AccessibleTopology`.
+8. The external-provisioner translates `AccessibleTopology` into
+   `PV.spec.nodeAffinity`, so later pod scheduling is constrained to nodes
+   that match the selected cluster topology.
+9. The selected `clusterID` is encoded into the `volumeHandle`, so all
    subsequent operations (mount, expand, delete) use the correct cluster
    without needing topology resolution again.
 
 **The key outcome: the RBD image is physically created in the Ceph cluster
 that matches the node's topology zone.** This ensures data locality — the
-storage backend is in the same zone as the compute node.
+storage backend is in the same zone as the compute node. When
+`topologyDomainLabels` are configured for the selected cluster, the resulting
+PV also carries a matching node affinity via `AccessibleTopology`.
 
 **Important requirement:** The StorageClass **must** use
 `volumeBindingMode: WaitForFirstConsumer`. With `Immediate` binding,
@@ -173,14 +208,16 @@ Kubernetes calls `CreateVolume` before scheduling the pod, so no
 |------|--------|
 | `api/deploy/kubernetes/csi-config-map.go` | Added `TopologyDomainLabels map[string]string` field to `ClusterInfo` struct |
 | `vendor/.../csi-config-map.go` | Same (vendor copy) |
-| `internal/util/csiconfig.go` | Added constant `ClusterIDsKey`, 4 new functions: `readAllClusterInfos`, `matchClusterTopology`, `FindClusterByTopology`, `GetClusterIDByTopology` |
-| `internal/util/csiconfig_test.go` | Added `TestFindClusterByTopology` and `TestGetClusterIDByTopology` |
-| `internal/rbd/controllerserver.go` | Relaxed `validateVolumeReq` to accept `clusterID` OR `clusterIDs`; passed `AccessibilityRequirements` to `genVolFromVolumeOptions` |
+| `internal/util/csiconfig.go` | Added constant `ClusterIDsKey`, topology selection helpers, and `GetClusterTopologyDomainLabels` for looking up `TopologyDomainLabels` of the selected cluster |
+| `internal/util/csiconfig_test.go` | Added tests for topology-based cluster selection and `GetClusterTopologyDomainLabels` |
+| `internal/rbd/controllerserver.go` | Relaxed `validateVolumeReq` to accept `clusterID` OR `clusterIDs`; passed `AccessibilityRequirements` to `genVolFromVolumeOptions`; added fallback that sets `rbdVol.Topology` from the selected cluster when `clusterIDs` is used |
 | `internal/rbd/rbd_util.go` | Added `topologyReq *csi.TopologyRequirement` parameter to `genVolFromVolumeOptions`; added fallback from `GetClusterID` to `GetClusterIDByTopology` |
+| `internal/rbd/controllerserver_test.go` | Added coverage for serializing `Topology` into `Volume.AccessibleTopology` |
 | `internal/rbd/nodeserver.go` | Pass `nil` for new `topologyReq` parameter (node-side operations don't need topology selection) |
-| `internal/cephfs/store/volumeoptions.go` | Added `topologyReq` parameter to `GetClusterInformation` and `getVolumeOptions`; added topology fallback in `GetClusterInformation` |
+| `internal/cephfs/store/volumeoptions.go` | Added `topologyReq` parameter to `GetClusterInformation` and `getVolumeOptions`; added topology fallback in `GetClusterInformation`; propagates selected cluster `TopologyDomainLabels` into `VolumeOptions.Topology` |
 | `internal/cephfs/store/volumegroup.go` | Pass `nil` for new `topologyReq` parameter |
 | `internal/cephfs/controllerserver.go` | Pass `nil` for new `topologyReq` parameter (snapshot operations) |
+| `internal/cephfs/controllerserver_test.go` | Added coverage for serializing `Topology` into `Volume.AccessibleTopology` |
 | `deploy/csi-config-map-sample.yaml` | Added documentation and example for `topologyDomainLabels` |
 
 ### What Is NOT Changed
@@ -199,8 +236,10 @@ Kubernetes calls `CreateVolume` before scheduling the pod, so no
 |----------|----------|
 | Existing config.json without `topologyDomainLabels` | Works unchanged — field is `omitempty` |
 | StorageClass with single `clusterID` | Fast path — `GetClusterID` succeeds, topology never consulted |
-| StorageClass with `clusterIDs` + `WaitForFirstConsumer` | New path — topology-based cluster selection |
+| StorageClass with `clusterIDs` + `WaitForFirstConsumer` | New path — topology-based cluster selection; when the selected cluster has `topologyDomainLabels`, `AccessibleTopology` is returned and the PV gets matching `nodeAffinity` |
+| StorageClass with `clusterIDs` but selected cluster has no `topologyDomainLabels` | Volume provisioning still works, but no additional `AccessibleTopology` / PV node affinity is produced |
 | StorageClass with `clusterIDs` but `Immediate` binding | Fails — no `AccessibilityRequirements` provided by CO |
+| StorageClass with `topologyConstrainedPools` | Existing pool-based topology handling is preserved; cluster-level topology is only used as a fallback when no volume topology was already set |
 | Delete/Expand/Mount of volumes created with topology | Works — volumeHandle has the selected clusterID encoded |
 
 ## Future Work (Phase 2)
@@ -211,4 +250,6 @@ In a future iteration, once this approach is validated:
   (currently both are accepted, but at least one is required)
 - Remove the need for the fallback pattern — `clusterIDs` becomes a first-class
   alternative to `clusterID`
-- Add E2E tests with multi-cluster topology setup
+- Add E2E tests with multi-cluster topology setup, including verification that
+  `AccessibleTopology` is translated into `PV.spec.nodeAffinity` and prevents
+  scheduling volumes onto nodes outside the selected cluster topology

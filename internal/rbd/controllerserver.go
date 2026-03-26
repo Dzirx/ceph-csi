@@ -321,6 +321,30 @@ func buildCreateVolumeResponse(
 	return &csi.CreateVolumeResponse{Volume: volume}, nil
 }
 
+func setClusterTopologyForMultiClusterVolume(
+	parameters map[string]string,
+	rbdVol *rbdVolume,
+) error {
+	if rbdVol.Topology != nil || rbdVol.ClusterID == "" {
+		return nil
+	}
+
+	_, hasClusterIDs := parameters[util.ClusterIDsKey]
+	clusterID, hasClusterID := parameters[util.ClusterIDKey]
+	if !hasClusterIDs || (hasClusterID && clusterID != "") {
+		return nil
+	}
+
+	topology, err := util.GetClusterTopologyDomainLabels(util.CsiConfigFile, rbdVol.ClusterID)
+	if err != nil {
+		return err
+	}
+
+	rbdVol.Topology = topology
+
+	return nil
+}
+
 // getGRPCErrorForCreateVolume converts the returns the GRPC errors based on
 // the input error types it expected to use only for CreateVolume as we need to
 // return different GRPC codes for different functions based on the input.
@@ -407,6 +431,11 @@ func (cs *ControllerServer) CreateVolume(
 	}
 
 	err = updateTopologyConstraints(rbdVol, rbdSnap)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	err = setClusterTopologyForMultiClusterVolume(req.GetParameters(), rbdVol)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}

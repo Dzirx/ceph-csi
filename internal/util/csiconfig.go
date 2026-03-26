@@ -105,6 +105,25 @@ func Mons(pathToConfig, clusterID string) (string, error) {
 	return strings.Join(cluster.Monitors, ","), nil
 }
 
+// GetClusterTopologyDomainLabels returns a copy of topologyDomainLabels for the given clusterID.
+func GetClusterTopologyDomainLabels(pathToConfig, clusterID string) (map[string]string, error) {
+	cluster, err := readClusterInfo(pathToConfig, clusterID)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(cluster.TopologyDomainLabels) == 0 {
+		return nil, nil
+	}
+
+	topology := make(map[string]string, len(cluster.TopologyDomainLabels))
+	for label, value := range cluster.TopologyDomainLabels {
+		topology[label] = value
+	}
+
+	return topology, nil
+}
+
 // GetRBDRadosNamespace returns the namespace for the given clusterID.
 func GetRBDRadosNamespace(pathToConfig, clusterID string) (string, error) {
 	cluster, err := readClusterInfo(pathToConfig, clusterID)
