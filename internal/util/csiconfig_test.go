@@ -932,12 +932,12 @@ func TestFindClusterByTopology(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := FindClusterByTopology(tmpConfPath, tt.clusterIDs, tt.topologyReq)
+			gotID, _, err := FindClusterByTopology(tmpConfPath, tt.clusterIDs, tt.topologyReq)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
-				assert.Equal(t, tt.wantID, got)
+				assert.Equal(t, tt.wantID, gotID)
 			}
 		})
 	}

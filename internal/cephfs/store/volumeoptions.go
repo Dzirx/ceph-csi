@@ -188,18 +188,19 @@ func GetClusterInformation(
 	options map[string]string,
 	topologyReq *csi.TopologyRequirement,
 ) (*cephcsi.ClusterInfo, error) {
-	selectedByTopology := false
+	var matchedTopology map[string]string
 
 	clusterID, ok := options["clusterID"]
 	if !ok || clusterID == "" {
-		// Fallback: try topology-based cluster selection
+		// Fallback: try topology-based cluster selection.
+		// GetClusterIDAndTopologyByTopology returns the topology labels directly
+		// from the matched config entry, which is correct even when the same
+		// clusterID appears multiple times with different topology labels.
 		var err error
-		clusterID, err = util.GetClusterIDByTopology(options, util.CsiConfigFile, topologyReq)
+		clusterID, matchedTopology, err = util.GetClusterIDAndTopologyByTopology(options, util.CsiConfigFile, topologyReq)
 		if err != nil {
 			return nil, errors.New("clusterID must be set or clusterIDs with topology requirements must be provided")
 		}
-
-		selectedByTopology = true
 	}
 
 	monitors, err := util.Mons(util.CsiConfigFile, clusterID)
@@ -223,17 +224,12 @@ func GetClusterInformation(
 		return nil, err
 	}
 	clusterData := &cephcsi.ClusterInfo{
-		ClusterID: clusterID,
-		Monitors:  strings.Split(monitors, ","),
+		ClusterID:            clusterID,
+		Monitors:             strings.Split(monitors, ","),
+		TopologyDomainLabels: matchedTopology,
 	}
 	clusterData.CephFS.SubvolumeGroup = subvolumeGroup
 	clusterData.CephFS.RadosNamespace = radosNamespace
-	if selectedByTopology {
-		clusterData.TopologyDomainLabels, err = util.GetClusterTopologyDomainLabels(util.CsiConfigFile, clusterID)
-		if err != nil {
-			return nil, err
-		}
-	}
 
 	return clusterData, nil
 }
