@@ -306,14 +306,6 @@ func (cs *ControllerServer) CreateVolume(
 	secret := req.GetSecrets()
 	requestName := req.GetName()
 
-	cr, err := util.NewAdminCredentials(secret)
-	if err != nil {
-		log.ErrorLog(ctx, "failed to retrieve admin credentials: %v", err)
-
-		return nil, status.Error(codes.InvalidArgument, err.Error())
-	}
-	defer cr.DeleteCredentials()
-
 	// Existence and conflict checks
 	if acquired := cs.VolumeLocks.TryAcquire(requestName); !acquired {
 		log.ErrorLog(ctx, util.VolumeOperationAlreadyExistsFmt, requestName)
@@ -322,12 +314,30 @@ func (cs *ControllerServer) CreateVolume(
 	}
 	defer cs.VolumeLocks.Release(requestName)
 
-	volOptions, err := store.NewVolumeOptions(ctx, requestName, cs.ClusterName, cs.SetMetadata, req, cr)
+	var (
+		cr         *util.Credentials
+		volOptions *store.VolumeOptions
+		err        error
+	)
+
+	if _, hasClusterIDs := req.GetParameters()[util.ClusterIDsKey]; hasClusterIDs {
+		// Topology-aware path: resolve clusterID first, then filter per-cluster credentials.
+		volOptions, cr, err = store.NewVolumeOptionsWithSecrets(ctx, requestName, cs.ClusterName, cs.SetMetadata, req, secret)
+	} else {
+		// Standard path: credentials created upfront.
+		cr, err = util.NewAdminCredentials(secret)
+		if err != nil {
+			log.ErrorLog(ctx, "failed to retrieve admin credentials: %v", err)
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+		volOptions, err = store.NewVolumeOptions(ctx, requestName, cs.ClusterName, cs.SetMetadata, req, cr)
+	}
 	if err != nil {
 		log.ErrorLog(ctx, "validation and extraction of volume options failed: %v", err)
 
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	defer cr.DeleteCredentials()
 	defer volOptions.Destroy()
 
 	if req.GetCapacityRange() != nil {
@@ -708,6 +718,18 @@ func (cs *ControllerServer) ControllerExpandVolume(
 
 	volID := req.GetVolumeId()
 	secret := req.GetSecrets()
+	resolvedSecret, secretErr := cs.resolveControllerExpandSecrets(ctx, volID, secret)
+	if secretErr != nil {
+		if len(secret) == 0 {
+			log.ErrorLog(ctx, "failed to resolve controller expand secrets for volume %s: %v", volID, secretErr)
+
+			return nil, status.Error(codes.Internal, secretErr.Error())
+		}
+		log.WarningLog(ctx, "continuing expand for volume %s with request secrets after controller secret lookup failed: %v",
+			volID, secretErr)
+	} else {
+		secret = resolvedSecret
+	}
 
 	// lock out parallel delete operations
 	if acquired := cs.VolumeLocks.TryAcquire(volID); !acquired {
@@ -752,6 +774,43 @@ func (cs *ControllerServer) ControllerExpandVolume(
 		CapacityBytes:         RoundOffSize,
 		NodeExpansionRequired: false,
 	}, nil
+}
+
+func (cs *ControllerServer) resolveControllerExpandSecrets(
+	ctx context.Context,
+	volID string,
+	secrets map[string]string,
+) (map[string]string, error) {
+	var vi util.CSIIdentifier
+	if err := vi.DecomposeCSIID(volID); err != nil {
+		return secrets, nil
+	}
+
+	pv, err := k8s.GetPersistentVolumeByVolumeHandle(volID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch persistentvolume for volume %q: %w", volID, err)
+	}
+	if pv.Spec.CSI == nil {
+		return secrets, nil
+	}
+
+	ref, isV1, err := util.GetControllerExpandSecretRefForCluster(pv.Spec.CSI.VolumeAttributes, vi.ClusterID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve controller-expand secret for cluster %q: %w", vi.ClusterID, err)
+	}
+	if !isV1 || ref == nil {
+		return secrets, nil
+	}
+
+	controllerSecrets, err := k8s.GetSecret(ref.Name, ref.Namespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get controller-expand secret %q/%q for cluster %q: %w",
+			ref.Namespace, ref.Name, vi.ClusterID, err)
+	}
+
+	log.DebugLog(ctx, "using controller-expand secret %s/%s for cluster %s", ref.Namespace, ref.Name, vi.ClusterID)
+
+	return mergeSecrets(secrets, controllerSecrets), nil
 }
 
 // CreateSnapshot creates the snapshot in backend and stores metadata

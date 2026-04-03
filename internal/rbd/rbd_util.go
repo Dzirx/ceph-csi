@@ -1398,11 +1398,16 @@ func genVolFromVolumeOptions(
 
 	clusterID, err := util.GetClusterID(volOptions)
 	if err != nil {
-		// Fallback: try topology-based cluster selection
-		clusterID, err = util.GetClusterIDByTopology(volOptions, util.CsiConfigFile, topologyReq)
+		// Fallback: try topology-based cluster selection.
+		// GetClusterIDAndTopologyByTopology returns the topology labels directly
+		// from the matched config entry, which is correct even when the same
+		// clusterID appears multiple times with different topology labels.
+		var matchedTopology map[string]string
+		clusterID, matchedTopology, err = util.GetClusterIDAndTopologyByTopology(volOptions, util.CsiConfigFile, topologyReq)
 		if err != nil {
 			return nil, err
 		}
+		rbdVol.Topology = matchedTopology
 	}
 	rbdVol.Monitors, rbdVol.ClusterID, err = util.GetMonsAndClusterID(ctx, clusterID, checkClusterIDMapping)
 	if err != nil {

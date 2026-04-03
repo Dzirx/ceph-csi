@@ -932,12 +932,12 @@ func TestFindClusterByTopology(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := FindClusterByTopology(tmpConfPath, tt.clusterIDs, tt.topologyReq)
+			gotID, _, err := FindClusterByTopology(tmpConfPath, tt.clusterIDs, tt.topologyReq)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
-				assert.Equal(t, tt.wantID, got)
+				assert.Equal(t, tt.wantID, gotID)
 			}
 		})
 	}
@@ -1015,4 +1015,254 @@ func TestGetClusterIDByTopology(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetClusterTopologyDomainLabels(t *testing.T) {
+	t.Parallel()
+
+	csiConfig := []cephcsi.ClusterInfo{
+		{
+			ClusterID: "cluster-a",
+			Monitors:  []string{"10.0.1.1:6789"},
+			TopologyDomainLabels: map[string]string{
+				"topology.kubernetes.io/zone":   "zone-a",
+				"topology.kubernetes.io/region": "region-a",
+			},
+		},
+		{
+			ClusterID: "cluster-b",
+			Monitors:  []string{"10.0.2.1:6789"},
+		},
+	}
+	csiConfigFileContent, err := json.Marshal(csiConfig)
+	require.NoError(t, err)
+
+	tmpConfPath := t.TempDir() + "/ceph-csi.json"
+	err = os.WriteFile(tmpConfPath, csiConfigFileContent, 0o600)
+	require.NoError(t, err)
+
+	t.Run("returns a copy of topology labels", func(t *testing.T) {
+		t.Parallel()
+
+		topology, getErr := GetClusterTopologyDomainLabels(tmpConfPath, "cluster-a")
+		require.NoError(t, getErr)
+		assert.Equal(t, map[string]string{
+			"topology.kubernetes.io/zone":   "zone-a",
+			"topology.kubernetes.io/region": "region-a",
+		}, topology)
+
+		topology["topology.kubernetes.io/zone"] = "mutated"
+
+		reloaded, reloadErr := GetClusterTopologyDomainLabels(tmpConfPath, "cluster-a")
+		require.NoError(t, reloadErr)
+		assert.Equal(t, "zone-a", reloaded["topology.kubernetes.io/zone"])
+	})
+
+	t.Run("returns nil when cluster has no topology labels", func(t *testing.T) {
+		t.Parallel()
+
+		topology, getErr := GetClusterTopologyDomainLabels(tmpConfPath, "cluster-b")
+		require.NoError(t, getErr)
+		assert.Nil(t, topology)
+	})
+}
+
+func TestParseV1ClusterIDs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("parses YAML list", func(t *testing.T) {
+		t.Parallel()
+		input := `
+- clusterID: cluster-dc1
+  csi.storage.k8s.io/provisioner-secret-name: secret-dc1
+  csi.storage.k8s.io/provisioner-secret-namespace: ceph-csi
+  fsName: dc1_fs
+  pool: dc1_fs.data_ec
+  topologyDomainLabels:
+    - topology.cephfs.csi.ceph.com/zone: zone-B
+    - topology.cephfs.csi.ceph.com/zone: zone-C
+`
+		entries, isV1, err := parseV1ClusterIDs(input)
+		require.NoError(t, err)
+		assert.True(t, isV1)
+		require.Len(t, entries, 1)
+		assert.Equal(t, "cluster-dc1", entries[0].ClusterID)
+		assert.Equal(t, "secret-dc1", entries[0].ProvisionerSecretName)
+		assert.Equal(t, "ceph-csi", entries[0].ProvisionerSecretNamespace)
+		assert.Equal(t, "dc1_fs", entries[0].FsName)
+		assert.Equal(t, "dc1_fs.data_ec", entries[0].Pool)
+		require.Len(t, entries[0].TopologyDomainLabels, 2)
+	})
+
+	t.Run("parses JSON array", func(t *testing.T) {
+		t.Parallel()
+		input := `[{"clusterID": "cluster-a", "fsName": "fs_a"}]`
+		entries, isV1, err := parseV1ClusterIDs(input)
+		require.NoError(t, err)
+		assert.True(t, isV1)
+		require.Len(t, entries, 1)
+		assert.Equal(t, "cluster-a", entries[0].ClusterID)
+		assert.Equal(t, "fs_a", entries[0].FsName)
+	})
+
+	t.Run("returns false for legacy comma-separated format", func(t *testing.T) {
+		t.Parallel()
+		entries, isV1, err := parseV1ClusterIDs("uuid1,uuid2")
+		require.NoError(t, err)
+		assert.False(t, isV1)
+		assert.Nil(t, entries)
+	})
+
+	t.Run("returns false for empty string", func(t *testing.T) {
+		t.Parallel()
+		entries, isV1, err := parseV1ClusterIDs("")
+		require.NoError(t, err)
+		assert.False(t, isV1)
+		assert.Nil(t, entries)
+	})
+
+	t.Run("returns error for malformed YAML list", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := parseV1ClusterIDs("- {invalid: [broken")
+		require.Error(t, err)
+	})
+}
+
+func TestExpandSCEntriesToClusterInfos(t *testing.T) {
+	t.Parallel()
+
+	t.Run("entry with three zones expands to three ClusterInfos", func(t *testing.T) {
+		t.Parallel()
+		entry := cephcsi.SCClusterEntry{
+			ClusterID:                  "cluster-dc1",
+			ProvisionerSecretName:      "secret-dc1",
+			ProvisionerSecretNamespace: "ceph-csi",
+			FsName:                     "dc1_fs",
+			Pool:                       "dc1_fs.data_ec",
+			TopologyDomainLabels: []map[string]string{
+				{"topology.cephfs.csi.ceph.com/zone": "zone-B"},
+				{"topology.cephfs.csi.ceph.com/zone": "zone-C"},
+				{"topology.cephfs.csi.ceph.com/zone": "zone-S"},
+			},
+		}
+		infos := expandSCEntriesToClusterInfos([]cephcsi.SCClusterEntry{entry})
+		require.Len(t, infos, 3)
+		for _, ci := range infos {
+			assert.Equal(t, "cluster-dc1", ci.ClusterID)
+			assert.Equal(t, "dc1_fs", ci.CephFS.FsName)
+			assert.Equal(t, "dc1_fs.data_ec", ci.CephFS.Pool)
+			assert.Equal(t, corev1.SecretReference{Name: "secret-dc1", Namespace: "ceph-csi"}, ci.CephFS.ProvisionerSecretRef)
+			require.Len(t, ci.TopologyDomainLabels, 1)
+		}
+		assert.Equal(t, map[string]string{"topology.cephfs.csi.ceph.com/zone": "zone-B"}, infos[0].TopologyDomainLabels)
+		assert.Equal(t, map[string]string{"topology.cephfs.csi.ceph.com/zone": "zone-C"}, infos[1].TopologyDomainLabels)
+		assert.Equal(t, map[string]string{"topology.cephfs.csi.ceph.com/zone": "zone-S"}, infos[2].TopologyDomainLabels)
+	})
+
+	t.Run("entry without zones produces one ClusterInfo with nil labels", func(t *testing.T) {
+		t.Parallel()
+		entry := cephcsi.SCClusterEntry{
+			ClusterID: "cluster-single",
+			FsName:    "single_fs",
+		}
+		infos := expandSCEntriesToClusterInfos([]cephcsi.SCClusterEntry{entry})
+		require.Len(t, infos, 1)
+		assert.Equal(t, "cluster-single", infos[0].ClusterID)
+		assert.Equal(t, "single_fs", infos[0].CephFS.FsName)
+		assert.Nil(t, infos[0].TopologyDomainLabels)
+	})
+}
+
+func TestGetClusterInfoByTopologyV1(t *testing.T) {
+	t.Parallel()
+
+	clusterIDsYAML := `
+- clusterID: cluster-dc1
+  csi.storage.k8s.io/provisioner-secret-name: secret-dc1
+  csi.storage.k8s.io/provisioner-secret-namespace: ceph-csi
+  csi.storage.k8s.io/node-stage-secret-name: node-secret-dc1
+  csi.storage.k8s.io/node-stage-secret-namespace: ceph-csi
+  csi.storage.k8s.io/controller-expand-secret-name: expand-secret-dc1
+  csi.storage.k8s.io/controller-expand-secret-namespace: ceph-csi
+  fsName: dc1_fs
+  pool: dc1_fs.data_ec
+  topologyDomainLabels:
+    - topology.cephfs.csi.ceph.com/zone: zone-B
+    - topology.cephfs.csi.ceph.com/zone: zone-C
+- clusterID: cluster-dc2
+  csi.storage.k8s.io/provisioner-secret-name: secret-dc2
+  csi.storage.k8s.io/provisioner-secret-namespace: ceph-csi
+  fsName: dc2_fs
+  topologyDomainLabels:
+    - topology.cephfs.csi.ceph.com/zone: zone-O
+`
+
+	makeTopologyReq := func(preferred []map[string]string, requisite []map[string]string) *csi.TopologyRequirement {
+		var pref []*csi.Topology
+		for _, seg := range preferred {
+			pref = append(pref, &csi.Topology{Segments: seg})
+		}
+		var req []*csi.Topology
+		for _, seg := range requisite {
+			req = append(req, &csi.Topology{Segments: seg})
+		}
+		return &csi.TopologyRequirement{Preferred: pref, Requisite: req}
+	}
+
+	zoneKey := "topology.cephfs.csi.ceph.com/zone"
+
+	t.Run("matches preferred zone-B to cluster-dc1", func(t *testing.T) {
+		t.Parallel()
+		options := map[string]string{ClusterIDsKey: clusterIDsYAML}
+		topReq := makeTopologyReq([]map[string]string{{zoneKey: "zone-B"}}, nil)
+		ci, isV1, err := GetClusterInfoByTopologyV1(options, topReq)
+		require.NoError(t, err)
+		assert.True(t, isV1)
+		require.NotNil(t, ci)
+		assert.Equal(t, "cluster-dc1", ci.ClusterID)
+		assert.Equal(t, "dc1_fs", ci.CephFS.FsName)
+		assert.Equal(t, "dc1_fs.data_ec", ci.CephFS.Pool)
+		assert.Equal(t, corev1.SecretReference{Name: "secret-dc1", Namespace: "ceph-csi"}, ci.CephFS.ProvisionerSecretRef)
+		assert.Equal(t, corev1.SecretReference{Name: "node-secret-dc1", Namespace: "ceph-csi"}, ci.CephFS.NodeStageSecretRef)
+		assert.Equal(t, corev1.SecretReference{Name: "expand-secret-dc1", Namespace: "ceph-csi"}, ci.CephFS.ControllerExpandSecretRef)
+		assert.Equal(t, map[string]string{zoneKey: "zone-B"}, ci.TopologyDomainLabels)
+	})
+
+	t.Run("matches preferred zone-O to cluster-dc2", func(t *testing.T) {
+		t.Parallel()
+		options := map[string]string{ClusterIDsKey: clusterIDsYAML}
+		topReq := makeTopologyReq([]map[string]string{{zoneKey: "zone-O"}}, nil)
+		ci, isV1, err := GetClusterInfoByTopologyV1(options, topReq)
+		require.NoError(t, err)
+		assert.True(t, isV1)
+		require.NotNil(t, ci)
+		assert.Equal(t, "cluster-dc2", ci.ClusterID)
+		assert.Equal(t, map[string]string{zoneKey: "zone-O"}, ci.TopologyDomainLabels)
+	})
+}
+
+func TestGetClusterSecretRefForV1ClusterIDs(t *testing.T) {
+	t.Parallel()
+
+	options := map[string]string{
+		ClusterIDsKey: `
+- clusterID: cluster-dc1
+  csi.storage.k8s.io/node-stage-secret-name: node-secret-dc1
+  csi.storage.k8s.io/node-stage-secret-namespace: ceph-csi
+  csi.storage.k8s.io/controller-expand-secret-name: expand-secret-dc1
+  csi.storage.k8s.io/controller-expand-secret-namespace: ceph-csi
+  topologyDomainLabels:
+    - topology.cephfs.csi.ceph.com/zone: zone-B
+`,
+	}
+
+	nodeRef, isV1, err := GetNodeStageSecretRefForCluster(options, "cluster-dc1")
+	require.NoError(t, err)
+	assert.True(t, isV1)
+	assert.Equal(t, &corev1.SecretReference{Name: "node-secret-dc1", Namespace: "ceph-csi"}, nodeRef)
+
+	expandRef, isV1, err := GetControllerExpandSecretRefForCluster(options, "cluster-dc1")
+	require.NoError(t, err)
+	assert.True(t, isV1)
+	assert.Equal(t, &corev1.SecretReference{Name: "expand-secret-dc1", Namespace: "ceph-csi"}, expandRef)
 }

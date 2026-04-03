@@ -139,6 +139,45 @@ func newCredentialsFromSecret(idField, keyField string, secrets map[string]strin
 	return c, err
 }
 
+// FilterSecretsForCluster returns a copy of the secrets map with credentials
+// resolved for the given clusterID. If keys "<clusterID>.userID" and
+// "<clusterID>.userKey" exist in the map, they are copied to "userID" and
+// "userKey" respectively, overriding any existing values. This allows a single
+// Secret to hold credentials for multiple Ceph clusters using the pattern:
+//
+//	<clusterID>.userID: <user>
+//	<clusterID>.userKey: <key>
+//
+// If no cluster-specific keys are found, the original map is returned unchanged.
+func FilterSecretsForCluster(secrets map[string]string, clusterID string) map[string]string {
+	if clusterID == "" {
+		return secrets
+	}
+
+	userIDKey := clusterID + "." + credUserID
+	userKeyKey := clusterID + "." + credUserKey
+
+	clusterUserID, hasUserID := secrets[userIDKey]
+	clusterUserKey, hasUserKey := secrets[userKeyKey]
+
+	if !hasUserID && !hasUserKey {
+		return secrets
+	}
+
+	filtered := make(map[string]string, len(secrets))
+	for k, v := range secrets {
+		filtered[k] = v
+	}
+	if hasUserID {
+		filtered[credUserID] = clusterUserID
+	}
+	if hasUserKey {
+		filtered[credUserKey] = clusterUserKey
+	}
+
+	return filtered
+}
+
 // GetMonValFromSecret returns monitors from secret.
 func GetMonValFromSecret(secrets map[string]string) (string, error) {
 	if mons, ok := secrets[credMonitors]; ok {
