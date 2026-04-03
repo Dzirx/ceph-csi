@@ -54,6 +54,21 @@ type CephFS struct {
 	// ControllerPublishSecretRef contains the secret reference for controller
 	// publish operations.
 	ControllerPublishSecretRef corev1.SecretReference `json:"controllerPublishSecretRef"`
+	// FsName is the name of the CephFS filesystem to use for volumes provisioned
+	// in this cluster. When set, overrides the fsName StorageClass parameter.
+	FsName string `json:"fsName,omitempty"`
+	// Pool is the optional CephFS pool used for subvolume layout.
+	// When set, overrides the pool StorageClass parameter.
+	Pool string `json:"pool,omitempty"`
+	// ProvisionerSecretRef holds the per-cluster provisioner secret resolved
+	// from the v1 clusterIDs SC format entry.
+	ProvisionerSecretRef corev1.SecretReference `json:"provisionerSecretRef,omitempty"`
+	// NodeStageSecretRef holds the per-cluster node-stage secret resolved
+	// from the v1 clusterIDs SC format entry.
+	NodeStageSecretRef corev1.SecretReference `json:"nodeStageSecretRef,omitempty"`
+	// ControllerExpandSecretRef holds the per-cluster controller-expand secret
+	// resolved from the v1 clusterIDs SC format entry.
+	ControllerExpandSecretRef corev1.SecretReference `json:"controllerExpandSecretRef,omitempty"`
 }
 type RBD struct {
 	// symlink filepath for the network namespace where we need to execute commands.
@@ -75,4 +90,21 @@ type NFS struct {
 type ReadAffinity struct {
 	Enabled             bool     `json:"enabled"`
 	CrushLocationLabels []string `json:"crushLocationLabels"`
+}
+
+// SCClusterEntry represents a single cluster entry in the v1 clusterIDs
+// StorageClass parameter YAML/JSON format. Each entry embeds per-cluster
+// secrets, filesystem options, and supported topology zones, so that the
+// ConfigMap needs to contain only monitors.
+type SCClusterEntry struct {
+	ClusterID                       string              `json:"clusterID"`
+	ProvisionerSecretName           string              `json:"csi.storage.k8s.io/provisioner-secret-name,omitempty"`
+	ProvisionerSecretNamespace      string              `json:"csi.storage.k8s.io/provisioner-secret-namespace,omitempty"`
+	NodeStageSecretName             string              `json:"csi.storage.k8s.io/node-stage-secret-name,omitempty"`
+	NodeStageSecretNamespace        string              `json:"csi.storage.k8s.io/node-stage-secret-namespace,omitempty"`
+	ControllerExpandSecretName      string              `json:"csi.storage.k8s.io/controller-expand-secret-name,omitempty"`
+	ControllerExpandSecretNamespace string              `json:"csi.storage.k8s.io/controller-expand-secret-namespace,omitempty"`
+	FsName                          string              `json:"fsName,omitempty"`
+	Pool                            string              `json:"pool,omitempty"`
+	TopologyDomainLabels            []map[string]string `json:"topologyDomainLabels,omitempty"`
 }

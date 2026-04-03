@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	corev1 "k8s.io/api/core/v1"
 
 	cephcsi "github.com/ceph/ceph-csi/api/deploy/kubernetes"
 	"github.com/ceph/ceph-csi/internal/cephfs/core"
@@ -62,6 +63,9 @@ type VolumeOptions struct {
 	TopologyPools        *[]util.TopologyConstrainedPool
 	TopologyRequirement  *csi.TopologyRequirement
 	Topology             map[string]string
+	// ProvisionerSecretRef holds the resolved provisioner secret reference from
+	// the v1 SC format entry. Empty for legacy single-clusterID deployments.
+	ProvisionerSecretRef corev1.SecretReference
 	FscID                int64
 
 	// Encryption provides access to optional VolumeEncryption functions
@@ -192,11 +196,36 @@ func GetClusterInformation(
 
 	clusterID, ok := options["clusterID"]
 	if !ok || clusterID == "" {
+		ci, isV1, err := util.GetClusterInfoByTopologyV1(options, topologyReq)
+		if err != nil {
+			return nil, err
+		}
+		if isV1 {
+			monitors, mErr := util.Mons(util.CsiConfigFile, ci.ClusterID)
+			if mErr != nil {
+				return nil, fmt.Errorf("failed to fetch monitor list using clusterID (%s): %w", ci.ClusterID, mErr)
+			}
+			ci.Monitors = strings.Split(monitors, ",")
+			if ci.CephFS.RadosNamespace == "" {
+				ci.CephFS.RadosNamespace, mErr = util.GetCephFSRadosNamespace(util.CsiConfigFile, ci.ClusterID)
+				if mErr != nil {
+					return nil, fmt.Errorf("failed to fetch rados namespace using clusterID (%s): %w", ci.ClusterID, mErr)
+				}
+			}
+			if ci.CephFS.SubvolumeGroup == "" {
+				ci.CephFS.SubvolumeGroup, mErr = util.CephFSSubvolumeGroup(util.CsiConfigFile, ci.ClusterID)
+				if mErr != nil {
+					return nil, fmt.Errorf("failed to fetch subvolumegroup using clusterID (%s): %w", ci.ClusterID, mErr)
+				}
+			}
+
+			return ci, nil
+		}
+
 		// Fallback: try topology-based cluster selection.
 		// GetClusterIDAndTopologyByTopology returns the topology labels directly
 		// from the matched config entry, which is correct even when the same
 		// clusterID appears multiple times with different topology labels.
-		var err error
 		clusterID, matchedTopology, err = util.GetClusterIDAndTopologyByTopology(options, util.CsiConfigFile, topologyReq)
 		if err != nil {
 			return nil, errors.New("clusterID must be set or clusterIDs with topology requirements must be provided")
@@ -262,9 +291,15 @@ func getVolumeOptions(vo map[string]string, topologyReq *csi.TopologyRequirement
 	opts.SubvolumeGroup = clusterData.CephFS.SubvolumeGroup
 	opts.RadosNamespace = clusterData.CephFS.RadosNamespace
 	opts.Topology = clusterData.TopologyDomainLabels
+	opts.ProvisionerSecretRef = clusterData.CephFS.ProvisionerSecretRef
 
-	if err = extractOption(&opts.FsName, "fsName", vo); err != nil {
+	if clusterData.CephFS.FsName != "" {
+		opts.FsName = clusterData.CephFS.FsName
+	} else if err = extractOption(&opts.FsName, "fsName", vo); err != nil {
 		return nil, err
+	}
+	if clusterData.CephFS.Pool != "" {
+		opts.Pool = clusterData.CephFS.Pool
 	}
 
 	return &opts, nil
@@ -295,8 +330,10 @@ func NewVolumeOptions(
 	opts.Owner = k8s.GetOwner(volOptions)
 	opts.BackingSnapshot = IsShallowVolumeSupported(req)
 
-	if err = extractOptionalOption(&opts.Pool, "pool", volOptions); err != nil {
-		return nil, err
+	if opts.Pool == "" {
+		if err = extractOptionalOption(&opts.Pool, "pool", volOptions); err != nil {
+			return nil, err
+		}
 	}
 
 	if err = extractMounter(&opts.Mounter, volOptions); err != nil {
@@ -380,8 +417,9 @@ func NewVolumeOptions(
 
 // NewVolumeOptionsWithSecrets is like NewVolumeOptions but accepts raw secrets
 // instead of pre-built Credentials. It resolves the clusterID first, then
-// filters per-cluster credentials from the secret using FilterSecretsForCluster,
-// and returns the resulting Credentials alongside VolumeOptions.
+// resolves per-cluster credentials from the request secret or a per-cluster
+// provisioner secret reference and returns the resulting Credentials alongside
+// VolumeOptions.
 // Use this instead of NewVolumeOptions when topology-aware cluster selection
 // is needed (i.e. StorageClass uses clusterIDs instead of clusterID).
 func NewVolumeOptionsWithSecrets(
@@ -399,7 +437,18 @@ func NewVolumeOptionsWithSecrets(
 		return nil, nil, err
 	}
 
-	cr, err := util.NewAdminCredentials(util.FilterSecretsForCluster(secrets, opts.ClusterID))
+	var cr *util.Credentials
+	if opts.ProvisionerSecretRef.Name != "" {
+		clusterSecrets, sErr := k8s.GetSecret(opts.ProvisionerSecretRef.Name, opts.ProvisionerSecretRef.Namespace)
+		if sErr != nil {
+			return nil, nil, fmt.Errorf(
+				"failed to get provisioner secret %q/%q for cluster %q: %w",
+				opts.ProvisionerSecretRef.Namespace, opts.ProvisionerSecretRef.Name, opts.ClusterID, sErr)
+		}
+		cr, err = util.NewAdminCredentials(clusterSecrets)
+	} else {
+		cr, err = util.NewAdminCredentials(util.FilterSecretsForCluster(secrets, opts.ClusterID))
+	}
 	if err != nil {
 		return nil, nil, err
 	}
