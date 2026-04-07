@@ -39,6 +39,7 @@ import (
 	hc "github.com/ceph/ceph-csi/internal/health-checker"
 	"github.com/ceph/ceph-csi/internal/util"
 	"github.com/ceph/ceph-csi/internal/util/fscrypt"
+	"github.com/ceph/ceph-csi/internal/util/k8s"
 	iolock "github.com/ceph/ceph-csi/internal/util/lock"
 	"github.com/ceph/ceph-csi/internal/util/log"
 )
@@ -68,9 +69,20 @@ func getCredentialsForVolume(
 	)
 
 	if volOptions.ProvisionVolume {
-		// The volume is provisioned dynamically, use passed in admin credentials
+		// The volume is provisioned dynamically, use passed in admin credentials.
+		// For the v1 clusterIDs SC format the node-stage secret is embedded
+		// inside clusterIDs and was resolved by NewVolumeOptionsFromVolID; fall
+		// back to it when the caller passes an empty secrets map.
+		effective := secrets
+		if len(effective) == 0 && volOptions.NodeStageSecretRef.Name != "" {
+			effective, err = k8s.GetSecret(volOptions.NodeStageSecretRef.Name, volOptions.NodeStageSecretRef.Namespace)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get node-stage secret %q/%q: %w",
+					volOptions.NodeStageSecretRef.Namespace, volOptions.NodeStageSecretRef.Name, err)
+			}
+		}
 
-		cr, err = util.NewAdminCredentials(secrets)
+		cr, err = util.NewAdminCredentials(effective)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get admin credentials from node stage secrets: %w", err)
 		}

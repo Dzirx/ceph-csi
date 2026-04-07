@@ -1066,3 +1066,235 @@ func TestGetClusterTopologyDomainLabels(t *testing.T) {
 		assert.Nil(t, topology)
 	})
 }
+
+func TestParseV1ClusterIDs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("parses YAML list", func(t *testing.T) {
+		t.Parallel()
+		input := `
+- clusterID: cluster-dc1
+  csi.storage.k8s.io/provisioner-secret-name: secret-dc1
+  csi.storage.k8s.io/provisioner-secret-namespace: ceph-csi
+  fsName: dc1_fs
+  pool: dc1_fs.data_ec
+  topologyDomainLabels:
+    - topology.cephfs.csi.ceph.com/zone: zone-B
+    - topology.cephfs.csi.ceph.com/zone: zone-C
+`
+		entries, isV1, err := parseV1ClusterIDs(input)
+		require.NoError(t, err)
+		assert.True(t, isV1)
+		require.Len(t, entries, 1)
+		assert.Equal(t, "cluster-dc1", entries[0].ClusterID)
+		assert.Equal(t, "secret-dc1", entries[0].ProvisionerSecretName)
+		assert.Equal(t, "ceph-csi", entries[0].ProvisionerSecretNamespace)
+		assert.Equal(t, "dc1_fs", entries[0].FsName)
+		assert.Equal(t, "dc1_fs.data_ec", entries[0].Pool)
+		require.Len(t, entries[0].TopologyDomainLabels, 2)
+	})
+
+	t.Run("parses JSON array", func(t *testing.T) {
+		t.Parallel()
+		input := `[{"clusterID": "cluster-a", "fsName": "fs_a"}]`
+		entries, isV1, err := parseV1ClusterIDs(input)
+		require.NoError(t, err)
+		assert.True(t, isV1)
+		require.Len(t, entries, 1)
+		assert.Equal(t, "cluster-a", entries[0].ClusterID)
+		assert.Equal(t, "fs_a", entries[0].FsName)
+	})
+
+	t.Run("returns false for legacy comma-separated format", func(t *testing.T) {
+		t.Parallel()
+		entries, isV1, err := parseV1ClusterIDs("uuid1,uuid2")
+		require.NoError(t, err)
+		assert.False(t, isV1)
+		assert.Nil(t, entries)
+	})
+
+	t.Run("returns false for empty string", func(t *testing.T) {
+		t.Parallel()
+		entries, isV1, err := parseV1ClusterIDs("")
+		require.NoError(t, err)
+		assert.False(t, isV1)
+		assert.Nil(t, entries)
+	})
+
+	t.Run("returns error for malformed YAML list", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := parseV1ClusterIDs("- {invalid: [broken")
+		require.Error(t, err)
+	})
+}
+
+func TestExpandSCEntriesToClusterInfos(t *testing.T) {
+	t.Parallel()
+
+	t.Run("entry with three zones expands to three ClusterInfos", func(t *testing.T) {
+		t.Parallel()
+		entry := cephcsi.SCClusterEntry{
+			ClusterID:              "cluster-dc1",
+			ProvisionerSecretName:  "secret-dc1",
+			ProvisionerSecretNamespace: "ceph-csi",
+			FsName:                 "dc1_fs",
+			Pool:                   "dc1_fs.data_ec",
+			TopologyDomainLabels: []map[string]string{
+				{"topology.cephfs.csi.ceph.com/zone": "zone-B"},
+				{"topology.cephfs.csi.ceph.com/zone": "zone-C"},
+				{"topology.cephfs.csi.ceph.com/zone": "zone-S"},
+			},
+		}
+		infos := expandSCEntriesToClusterInfos([]cephcsi.SCClusterEntry{entry})
+		require.Len(t, infos, 3)
+		for _, ci := range infos {
+			assert.Equal(t, "cluster-dc1", ci.ClusterID)
+			assert.Equal(t, "dc1_fs", ci.CephFS.FsName)
+			assert.Equal(t, "dc1_fs.data_ec", ci.CephFS.Pool)
+			assert.Equal(t, corev1.SecretReference{Name: "secret-dc1", Namespace: "ceph-csi"}, ci.CephFS.ProvisionerSecretRef)
+			require.Len(t, ci.TopologyDomainLabels, 1)
+		}
+		assert.Equal(t, map[string]string{"topology.cephfs.csi.ceph.com/zone": "zone-B"}, infos[0].TopologyDomainLabels)
+		assert.Equal(t, map[string]string{"topology.cephfs.csi.ceph.com/zone": "zone-C"}, infos[1].TopologyDomainLabels)
+		assert.Equal(t, map[string]string{"topology.cephfs.csi.ceph.com/zone": "zone-S"}, infos[2].TopologyDomainLabels)
+	})
+
+	t.Run("entry without zones produces one ClusterInfo with nil labels", func(t *testing.T) {
+		t.Parallel()
+		entry := cephcsi.SCClusterEntry{
+			ClusterID: "cluster-single",
+			FsName:    "single_fs",
+		}
+		infos := expandSCEntriesToClusterInfos([]cephcsi.SCClusterEntry{entry})
+		require.Len(t, infos, 1)
+		assert.Equal(t, "cluster-single", infos[0].ClusterID)
+		assert.Equal(t, "single_fs", infos[0].CephFS.FsName)
+		assert.Nil(t, infos[0].TopologyDomainLabels)
+	})
+}
+
+func TestGetClusterInfoByTopologyV1(t *testing.T) {
+	t.Parallel()
+
+	clusterIDsYAML := `
+- clusterID: cluster-dc1
+  csi.storage.k8s.io/provisioner-secret-name: secret-dc1
+  csi.storage.k8s.io/provisioner-secret-namespace: ceph-csi
+  fsName: dc1_fs
+  pool: dc1_fs.data_ec
+  topologyDomainLabels:
+    - topology.cephfs.csi.ceph.com/zone: zone-B
+    - topology.cephfs.csi.ceph.com/zone: zone-C
+- clusterID: cluster-dc2
+  csi.storage.k8s.io/provisioner-secret-name: secret-dc2
+  csi.storage.k8s.io/provisioner-secret-namespace: ceph-csi
+  fsName: dc2_fs
+  topologyDomainLabels:
+    - topology.cephfs.csi.ceph.com/zone: zone-O
+`
+
+	makeTopologyReq := func(preferred []map[string]string, requisite []map[string]string) *csi.TopologyRequirement {
+		var pref []*csi.Topology
+		for _, seg := range preferred {
+			pref = append(pref, &csi.Topology{Segments: seg})
+		}
+		var req []*csi.Topology
+		for _, seg := range requisite {
+			req = append(req, &csi.Topology{Segments: seg})
+		}
+		return &csi.TopologyRequirement{Preferred: pref, Requisite: req}
+	}
+
+	zoneKey := "topology.cephfs.csi.ceph.com/zone"
+
+	t.Run("matches preferred zone-B to cluster-dc1", func(t *testing.T) {
+		t.Parallel()
+		options := map[string]string{ClusterIDsKey: clusterIDsYAML}
+		topReq := makeTopologyReq([]map[string]string{{zoneKey: "zone-B"}}, nil)
+		ci, isV1, err := GetClusterInfoByTopologyV1(options, topReq)
+		require.NoError(t, err)
+		assert.True(t, isV1)
+		require.NotNil(t, ci)
+		assert.Equal(t, "cluster-dc1", ci.ClusterID)
+		assert.Equal(t, "dc1_fs", ci.CephFS.FsName)
+		assert.Equal(t, "dc1_fs.data_ec", ci.CephFS.Pool)
+		assert.Equal(t, corev1.SecretReference{Name: "secret-dc1", Namespace: "ceph-csi"}, ci.CephFS.ProvisionerSecretRef)
+		assert.Equal(t, map[string]string{zoneKey: "zone-B"}, ci.TopologyDomainLabels)
+	})
+
+	t.Run("matches preferred zone-C to cluster-dc1", func(t *testing.T) {
+		t.Parallel()
+		options := map[string]string{ClusterIDsKey: clusterIDsYAML}
+		topReq := makeTopologyReq([]map[string]string{{zoneKey: "zone-C"}}, nil)
+		ci, isV1, err := GetClusterInfoByTopologyV1(options, topReq)
+		require.NoError(t, err)
+		assert.True(t, isV1)
+		require.NotNil(t, ci)
+		assert.Equal(t, "cluster-dc1", ci.ClusterID)
+		assert.Equal(t, map[string]string{zoneKey: "zone-C"}, ci.TopologyDomainLabels)
+	})
+
+	t.Run("matches preferred zone-O to cluster-dc2", func(t *testing.T) {
+		t.Parallel()
+		options := map[string]string{ClusterIDsKey: clusterIDsYAML}
+		topReq := makeTopologyReq([]map[string]string{{zoneKey: "zone-O"}}, nil)
+		ci, isV1, err := GetClusterInfoByTopologyV1(options, topReq)
+		require.NoError(t, err)
+		assert.True(t, isV1)
+		require.NotNil(t, ci)
+		assert.Equal(t, "cluster-dc2", ci.ClusterID)
+		assert.Equal(t, "dc2_fs", ci.CephFS.FsName)
+		assert.Equal(t, corev1.SecretReference{Name: "secret-dc2", Namespace: "ceph-csi"}, ci.CephFS.ProvisionerSecretRef)
+		assert.Equal(t, map[string]string{zoneKey: "zone-O"}, ci.TopologyDomainLabels)
+	})
+
+	t.Run("falls back to requisite when preferred misses", func(t *testing.T) {
+		t.Parallel()
+		options := map[string]string{ClusterIDsKey: clusterIDsYAML}
+		topReq := makeTopologyReq(
+			[]map[string]string{{zoneKey: "zone-X"}},
+			[]map[string]string{{zoneKey: "zone-C"}},
+		)
+		ci, isV1, err := GetClusterInfoByTopologyV1(options, topReq)
+		require.NoError(t, err)
+		assert.True(t, isV1)
+		require.NotNil(t, ci)
+		assert.Equal(t, "cluster-dc1", ci.ClusterID)
+		assert.Equal(t, map[string]string{zoneKey: "zone-C"}, ci.TopologyDomainLabels)
+	})
+
+	t.Run("returns error when no cluster matches", func(t *testing.T) {
+		t.Parallel()
+		options := map[string]string{ClusterIDsKey: clusterIDsYAML}
+		topReq := makeTopologyReq([]map[string]string{{zoneKey: "zone-X"}}, nil)
+		_, _, err := GetClusterInfoByTopologyV1(options, topReq)
+		require.Error(t, err)
+	})
+
+	t.Run("returns error when topologyReq is nil", func(t *testing.T) {
+		t.Parallel()
+		options := map[string]string{ClusterIDsKey: clusterIDsYAML}
+		_, _, err := GetClusterInfoByTopologyV1(options, nil)
+		require.Error(t, err)
+	})
+
+	t.Run("returns false for legacy comma-separated clusterIDs", func(t *testing.T) {
+		t.Parallel()
+		options := map[string]string{ClusterIDsKey: "uuid1,uuid2"}
+		topReq := makeTopologyReq([]map[string]string{{zoneKey: "zone-B"}}, nil)
+		ci, isV1, err := GetClusterInfoByTopologyV1(options, topReq)
+		require.NoError(t, err)
+		assert.False(t, isV1)
+		assert.Nil(t, ci)
+	})
+
+	t.Run("returns false when clusterIDs not present", func(t *testing.T) {
+		t.Parallel()
+		options := map[string]string{}
+		topReq := makeTopologyReq([]map[string]string{{zoneKey: "zone-B"}}, nil)
+		ci, isV1, err := GetClusterInfoByTopologyV1(options, topReq)
+		require.NoError(t, err)
+		assert.False(t, isV1)
+		assert.Nil(t, ci)
+	})
+}

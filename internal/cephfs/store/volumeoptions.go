@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	corev1 "k8s.io/api/core/v1"
 
 	cephcsi "github.com/ceph/ceph-csi/api/deploy/kubernetes"
 	"github.com/ceph/ceph-csi/internal/cephfs/core"
@@ -62,6 +63,12 @@ type VolumeOptions struct {
 	TopologyPools        *[]util.TopologyConstrainedPool
 	TopologyRequirement  *csi.TopologyRequirement
 	Topology             map[string]string
+	// ProvisionerSecretRef holds the resolved provisioner secret reference from
+	// the v1 SC format entry. Empty for legacy single-clusterID deployments.
+	ProvisionerSecretRef corev1.SecretReference
+	// NodeStageSecretRef holds the resolved node-stage secret reference from
+	// the v1 SC format entry. Empty for legacy single-clusterID deployments.
+	NodeStageSecretRef corev1.SecretReference
 	FscID                int64
 
 	// Encryption provides access to optional VolumeEncryption functions
@@ -192,8 +199,33 @@ func GetClusterInformation(
 
 	clusterID, ok := options["clusterID"]
 	if !ok || clusterID == "" {
-		// Fallback: try topology-based cluster selection
-		var err error
+		// v1 SC format — ClusterInfo fully built from SC entry, only monitors from ConfigMap
+		ci, isV1, err := util.GetClusterInfoByTopologyV1(options, topologyReq)
+		if err != nil {
+			return nil, err
+		}
+		if isV1 {
+			monitors, mErr := util.Mons(util.CsiConfigFile, ci.ClusterID)
+			if mErr != nil {
+				return nil, fmt.Errorf("failed to fetch monitor list using clusterID (%s): %w", ci.ClusterID, mErr)
+			}
+			ci.Monitors = strings.Split(monitors, ",")
+			if ci.CephFS.RadosNamespace == "" {
+				ci.CephFS.RadosNamespace, mErr = util.GetCephFSRadosNamespace(util.CsiConfigFile, ci.ClusterID)
+				if mErr != nil {
+					return nil, fmt.Errorf("failed to fetch rados namespace using clusterID (%s): %w", ci.ClusterID, mErr)
+				}
+			}
+			if ci.CephFS.SubvolumeGroup == "" {
+				ci.CephFS.SubvolumeGroup, mErr = util.CephFSSubvolumeGroup(util.CsiConfigFile, ci.ClusterID)
+				if mErr != nil {
+					return nil, fmt.Errorf("failed to fetch subvolumegroup using clusterID (%s): %w", ci.ClusterID, mErr)
+				}
+			}
+			return ci, nil
+		}
+
+		// Legacy: comma-separated clusterIDs → resolve via ConfigMap topology
 		clusterID, err = util.GetClusterIDByTopology(options, util.CsiConfigFile, topologyReq)
 		if err != nil {
 			return nil, errors.New("clusterID must be set or clusterIDs with topology requirements must be provided")
@@ -266,9 +298,15 @@ func getVolumeOptions(vo map[string]string, topologyReq *csi.TopologyRequirement
 	opts.SubvolumeGroup = clusterData.CephFS.SubvolumeGroup
 	opts.RadosNamespace = clusterData.CephFS.RadosNamespace
 	opts.Topology = clusterData.TopologyDomainLabels
+	opts.ProvisionerSecretRef = clusterData.CephFS.ProvisionerSecretRef
 
-	if err = extractOption(&opts.FsName, "fsName", vo); err != nil {
+	if clusterData.CephFS.FsName != "" {
+		opts.FsName = clusterData.CephFS.FsName
+	} else if err = extractOption(&opts.FsName, "fsName", vo); err != nil {
 		return nil, err
+	}
+	if clusterData.CephFS.Pool != "" {
+		opts.Pool = clusterData.CephFS.Pool
 	}
 
 	return &opts, nil
@@ -403,7 +441,18 @@ func NewVolumeOptionsWithSecrets(
 		return nil, nil, err
 	}
 
-	cr, err := util.NewAdminCredentials(util.FilterSecretsForCluster(secrets, opts.ClusterID))
+	var cr *util.Credentials
+	if opts.ProvisionerSecretRef.Name != "" {
+		clusterSecrets, sErr := k8s.GetSecret(opts.ProvisionerSecretRef.Name, opts.ProvisionerSecretRef.Namespace)
+		if sErr != nil {
+			return nil, nil, fmt.Errorf(
+				"failed to get provisioner secret %q/%q for cluster %q: %w",
+				opts.ProvisionerSecretRef.Namespace, opts.ProvisionerSecretRef.Name, opts.ClusterID, sErr)
+		}
+		cr, err = util.NewAdminCredentials(clusterSecrets)
+	} else {
+		cr, err = util.NewAdminCredentials(util.FilterSecretsForCluster(secrets, opts.ClusterID))
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -479,6 +528,38 @@ func NewVolumeOptionsFromVolID(
 
 	if volOptions.RadosNamespace, err = util.GetCephFSRadosNamespace(util.CsiConfigFile, vi.ClusterID); err != nil {
 		return nil, nil, fmt.Errorf("failed to fetch rados namespace using clusterID (%s): %w", vi.ClusterID, err)
+	}
+
+	// v1 SC format (controller path): volOpt is nil but the PV's volumeAttributes
+	// contain clusterIDs with an embedded provisioner secret. Look up the PV to
+	// resolve credentials so DeleteVolume/ControllerExpand work without a
+	// top-level csi.storage.k8s.io/provisioner-secret-name on the StorageClass.
+	if volOpt == nil && len(secrets) == 0 {
+		if pvAttrs, pvErr := k8s.GetVolumeAttributesByVolumeHandle(volID); pvErr == nil && pvAttrs != nil {
+			if ref, isV1, refErr := util.GetProvisionerSecretRefForCluster(pvAttrs, vi.ClusterID); refErr == nil && isV1 && ref != nil {
+				if provSecrets, sErr := k8s.GetSecret(ref.Name, ref.Namespace); sErr == nil {
+					secrets = provSecrets
+					volOptions.ProvisionerSecretRef = *ref
+				}
+			}
+		}
+		// silently fall through on any lookup error — NewAdminCredentials below
+		// will surface the failure with a clear message, preserving existing
+		// behavior for non-v1 formats and old-style deployments.
+	}
+
+	// v1 SC format: node-stage-secret-name is embedded inside the clusterIDs
+	// string and Kubernetes does not pass it automatically. Fetch it directly.
+	if ref, isV1, refErr := util.GetNodeStageSecretRefForCluster(volOpt, vi.ClusterID); refErr != nil {
+		return nil, nil, fmt.Errorf("failed to resolve node-stage secret for cluster %q: %w", vi.ClusterID, refErr)
+	} else if isV1 && ref != nil {
+		nodeSecrets, sErr := k8s.GetSecret(ref.Name, ref.Namespace)
+		if sErr != nil {
+			return nil, nil, fmt.Errorf("failed to get node-stage secret %q/%q for cluster %q: %w",
+				ref.Namespace, ref.Name, vi.ClusterID, sErr)
+		}
+		secrets = nodeSecrets
+		volOptions.NodeStageSecretRef = *ref
 	}
 
 	cr, err := util.NewAdminCredentials(util.FilterSecretsForCluster(secrets, vi.ClusterID))

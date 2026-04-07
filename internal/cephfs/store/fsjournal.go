@@ -230,14 +230,8 @@ func UndoVolReservation(
 	ctx context.Context,
 	volOptions *VolumeOptions,
 	vid VolumeIdentifier,
-	secret map[string]string,
+	cr *util.Credentials,
 ) error {
-	cr, err := util.NewAdminCredentials(secret)
-	if err != nil {
-		return err
-	}
-	defer cr.DeleteCredentials()
-
 	j, err := VolJournal.Connect(volOptions.Monitors, volOptions.RadosNamespace, cr)
 	if err != nil {
 		return err
@@ -274,18 +268,12 @@ func getEncryptionConfig(volOptions *VolumeOptions) (string, crypto.EncryptionTy
 
 // ReserveVol is a helper routine to request a UUID reservation for the CSI VolumeName and,
 // to generate the volume identifier for the reserved UUID.
-func ReserveVol(ctx context.Context, volOptions *VolumeOptions, secret map[string]string) (*VolumeIdentifier, error) {
+func ReserveVol(ctx context.Context, volOptions *VolumeOptions, cr *util.Credentials) (*VolumeIdentifier, error) {
 	var (
 		vid       VolumeIdentifier
 		imageUUID string
 		err       error
 	)
-
-	cr, err := util.NewAdminCredentials(secret)
-	if err != nil {
-		return nil, err
-	}
-	defer cr.DeleteCredentials()
 
 	err = updateTopologyConstraints(volOptions)
 	if err != nil {
