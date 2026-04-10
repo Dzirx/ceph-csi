@@ -80,6 +80,19 @@ type RBD struct {
 	// ControllerPublishSecretRef contains the secret reference for controller
 	// publish operations.
 	ControllerPublishSecretRef corev1.SecretReference `json:"controllerPublishSecretRef"`
+	// Pool is the RBD pool resolved from the v1 clusterIDs SC entry.
+	Pool string `json:"pool,omitempty"`
+	// DataPool is the optional EC data pool resolved from the v1 clusterIDs SC entry.
+	DataPool string `json:"dataPool,omitempty"`
+	// ProvisionerSecretRef holds the per-cluster provisioner secret resolved
+	// from the v1 clusterIDs SC entry.
+	ProvisionerSecretRef corev1.SecretReference `json:"provisionerSecretRef,omitempty"`
+	// NodeStageSecretRef holds the per-cluster node-stage secret resolved
+	// from the v1 clusterIDs SC entry.
+	NodeStageSecretRef corev1.SecretReference `json:"nodeStageSecretRef,omitempty"`
+	// ControllerExpandSecretRef holds the per-cluster controller-expand secret
+	// resolved from the v1 clusterIDs SC entry.
+	ControllerExpandSecretRef corev1.SecretReference `json:"controllerExpandSecretRef,omitempty"`
 }
 
 type NFS struct {
@@ -106,5 +119,6 @@ type SCClusterEntry struct {
 	ControllerExpandSecretNamespace string              `json:"csi.storage.k8s.io/controller-expand-secret-namespace,omitempty"`
 	FsName                          string              `json:"fsName,omitempty"`
 	Pool                            string              `json:"pool,omitempty"`
+	DataPool                        string              `json:"dataPool,omitempty"`
 	TopologyDomainLabels            []map[string]string `json:"topologyDomainLabels,omitempty"`
 }

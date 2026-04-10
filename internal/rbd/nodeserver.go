@@ -345,6 +345,31 @@ func (rv *rbdVolume) appendReadAffinityMapOptions(readAffinityMapOptions string)
 //   - Map the image (creates a device)
 //   - Create the staging file/directory under staging path
 //   - Stage the device (mount the device mapped for image)
+// resolveNodeStageCredentials resolves credentials for NodeStageVolume.
+// For the v1 SC format, req.GetSecrets() is empty because there is no flat
+// csi.storage.k8s.io/node-stage-secret-* in the StorageClass. In that case
+// the clusterID is decoded from volumeID, the per-cluster node-stage secret
+// is looked up from volumeContext (PV attributes), and fetched from Kubernetes.
+func resolveNodeStageCredentials(volumeID string, volumeContext, secrets map[string]string) (*util.Credentials, error) {
+	if len(secrets) > 0 {
+		return util.NewUserCredentialsWithMigration(secrets)
+	}
+	var vi util.CSIIdentifier
+	if err := vi.DecomposeCSIID(volumeID); err != nil {
+		return util.NewUserCredentialsWithMigration(secrets) // will surface "provided secret is empty"
+	}
+	ref, isV1, refErr := util.GetNodeStageSecretRefForCluster(volumeContext, vi.ClusterID)
+	if refErr != nil || !isV1 || ref == nil {
+		return util.NewUserCredentialsWithMigration(secrets)
+	}
+	stageSecrets, sErr := k8s.GetSecret(ref.Name, ref.Namespace)
+	if sErr != nil {
+		return nil, fmt.Errorf("failed to get node-stage secret %q/%q for cluster %q: %w",
+			ref.Namespace, ref.Name, vi.ClusterID, sErr)
+	}
+	return util.NewUserCredentialsWithMigration(stageSecrets)
+}
+
 func (ns *NodeServer) NodeStageVolume(
 	ctx context.Context,
 	req *csi.NodeStageVolumeRequest,
@@ -355,7 +380,7 @@ func (ns *NodeServer) NodeStageVolume(
 	}
 
 	volID := req.GetVolumeId()
-	cr, err := util.NewUserCredentialsWithMigration(req.GetSecrets())
+	cr, err := resolveNodeStageCredentials(volID, req.GetVolumeContext(), req.GetSecrets())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}

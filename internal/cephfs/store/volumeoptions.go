@@ -195,8 +195,6 @@ func GetClusterInformation(
 	options map[string]string,
 	topologyReq *csi.TopologyRequirement,
 ) (*cephcsi.ClusterInfo, error) {
-	selectedByTopology := false
-
 	clusterID, ok := options["clusterID"]
 	if !ok || clusterID == "" {
 		// v1 SC format — ClusterInfo fully built from SC entry, only monitors from ConfigMap
@@ -225,13 +223,7 @@ func GetClusterInformation(
 			return ci, nil
 		}
 
-		// Legacy: comma-separated clusterIDs → resolve via ConfigMap topology
-		clusterID, err = util.GetClusterIDByTopology(options, util.CsiConfigFile, topologyReq)
-		if err != nil {
-			return nil, errors.New("clusterID must be set or clusterIDs with topology requirements must be provided")
-		}
-
-		selectedByTopology = true
+		return nil, errors.New("clusterID must be set or clusterIDs in v1 YAML format must be provided")
 	}
 
 	monitors, err := util.Mons(util.CsiConfigFile, clusterID)
@@ -260,12 +252,6 @@ func GetClusterInformation(
 	}
 	clusterData.CephFS.SubvolumeGroup = subvolumeGroup
 	clusterData.CephFS.RadosNamespace = radosNamespace
-	if selectedByTopology {
-		clusterData.TopologyDomainLabels, err = util.GetClusterTopologyDomainLabels(util.CsiConfigFile, clusterID)
-		if err != nil {
-			return nil, err
-		}
-	}
 
 	return clusterData, nil
 }

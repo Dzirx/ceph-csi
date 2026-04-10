@@ -322,24 +322,34 @@ func buildClusterInfoFromSCEntry(entry kubernetes.SCClusterEntry, zone map[strin
 			FsName: entry.FsName,
 			Pool:   entry.Pool,
 		},
+		RBD: kubernetes.RBD{
+			Pool:     entry.Pool,
+			DataPool: entry.DataPool,
+		},
 	}
 	if entry.ProvisionerSecretName != "" {
-		ci.CephFS.ProvisionerSecretRef = corev1.SecretReference{
+		ref := corev1.SecretReference{
 			Name:      entry.ProvisionerSecretName,
 			Namespace: entry.ProvisionerSecretNamespace,
 		}
+		ci.CephFS.ProvisionerSecretRef = ref
+		ci.RBD.ProvisionerSecretRef = ref
 	}
 	if entry.NodeStageSecretName != "" {
-		ci.CephFS.NodeStageSecretRef = corev1.SecretReference{
+		ref := corev1.SecretReference{
 			Name:      entry.NodeStageSecretName,
 			Namespace: entry.NodeStageSecretNamespace,
 		}
+		ci.CephFS.NodeStageSecretRef = ref
+		ci.RBD.NodeStageSecretRef = ref
 	}
 	if entry.ControllerExpandSecretName != "" {
-		ci.CephFS.ControllerExpandSecretRef = corev1.SecretReference{
+		ref := corev1.SecretReference{
 			Name:      entry.ControllerExpandSecretName,
 			Namespace: entry.ControllerExpandSecretNamespace,
 		}
+		ci.CephFS.ControllerExpandSecretRef = ref
+		ci.RBD.ControllerExpandSecretRef = ref
 	}
 	return ci
 }
@@ -476,25 +486,6 @@ func GetNodeStageSecretRefForCluster(options map[string]string, clusterID string
 	return nil, false, nil
 }
 
-// readAllClusterInfos reads and returns all cluster entries from the config file.
-func readAllClusterInfos(pathToConfig string) ([]kubernetes.ClusterInfo, error) {
-	var config []kubernetes.ClusterInfo
-
-	// #nosec
-	content, err := os.ReadFile(pathToConfig)
-	if err != nil {
-		return nil, fmt.Errorf("error reading CSI config file %q: %w", pathToConfig, err)
-	}
-
-	err = json.Unmarshal(content, &config)
-	if err != nil {
-		return nil, fmt.Errorf("unmarshal failed (%w), raw buffer response: %s",
-			err, string(content))
-	}
-
-	return config, nil
-}
-
 // matchClusterTopology checks if a cluster's TopologyDomainLabels match
 // the given topology segments. All labels defined in the cluster config
 // must be present and match in the topology segments.
@@ -513,79 +504,3 @@ func matchClusterTopology(cluster *kubernetes.ClusterInfo, segments map[string]s
 	return true
 }
 
-// FindClusterByTopology selects a cluster from the config file based on
-// topology requirements. It filters clusters by the given clusterIDs list
-// and matches their TopologyDomainLabels against the AccessibilityRequirements.
-// Preferred topologies are checked first, then requisite.
-func FindClusterByTopology(
-	pathToConfig string,
-	clusterIDs []string,
-	topologyReq *csi.TopologyRequirement,
-) (string, error) {
-	if topologyReq == nil {
-		return "", fmt.Errorf("topology requirements are nil, cannot select cluster")
-	}
-
-	allClusters, err := readAllClusterInfos(pathToConfig)
-	if err != nil {
-		return "", err
-	}
-
-	// build a set of allowed clusterIDs for fast lookup
-	allowed := make(map[string]bool, len(clusterIDs))
-	for _, id := range clusterIDs {
-		allowed[strings.TrimSpace(id)] = true
-	}
-
-	// filter clusters to only those in the allowed list
-	var candidates []kubernetes.ClusterInfo
-	for i := range allClusters {
-		if allowed[allClusters[i].ClusterID] {
-			candidates = append(candidates, allClusters[i])
-		}
-	}
-
-	if len(candidates) == 0 {
-		return "", fmt.Errorf("none of the cluster IDs %v found in CSI config %q", clusterIDs, pathToConfig)
-	}
-
-	// check preferred topologies first
-	for _, topology := range topologyReq.GetPreferred() {
-		for i := range candidates {
-			if matchClusterTopology(&candidates[i], topology.GetSegments()) {
-				return candidates[i].ClusterID, nil
-			}
-		}
-	}
-
-	// fall back to requisite topologies
-	for _, topology := range topologyReq.GetRequisite() {
-		for i := range candidates {
-			if matchClusterTopology(&candidates[i], topology.GetSegments()) {
-				return candidates[i].ClusterID, nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf(
-		"no cluster from %v matches the topology requirements (preferred: %v, requisite: %v)",
-		clusterIDs, topologyReq.GetPreferred(), topologyReq.GetRequisite())
-}
-
-// GetClusterIDByTopology checks if the options contain a "clusterIDs" parameter
-// and resolves the appropriate clusterID based on topology requirements.
-// Returns ErrClusterIDNotSet if "clusterIDs" is not present in the options.
-func GetClusterIDByTopology(
-	options map[string]string,
-	pathToConfig string,
-	topologyReq *csi.TopologyRequirement,
-) (string, error) {
-	clusterIDsStr, ok := options[ClusterIDsKey]
-	if !ok || clusterIDsStr == "" {
-		return "", ErrClusterIDNotSet
-	}
-
-	clusterIDs := strings.Split(clusterIDsStr, ",")
-
-	return FindClusterByTopology(pathToConfig, clusterIDs, topologyReq)
-}

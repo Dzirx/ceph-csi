@@ -90,16 +90,20 @@ func (cs *ControllerServer) validateVolumeReq(ctx context.Context, req *csi.Crea
 	if hasClusterID && clusterIDVal == "" {
 		return status.Error(codes.InvalidArgument, "empty cluster ID to provision volume from")
 	}
-	poolValue, poolOK := options["pool"]
-	topologyConstrainedPoolsValue, topologyOK := options["topologyConstrainedPools"]
-	if !poolOK {
-		if topologyOK && topologyConstrainedPoolsValue == "" {
-			return status.Error(codes.InvalidArgument, "empty pool name or topologyConstrainedPools to provision volume")
-		} else if !topologyOK {
+	// For v1 clusterIDs format the pool is embedded inside the clusterIDs YAML,
+	// not as a top-level parameter — skip the pool check in that case.
+	if !hasClusterIDs {
+		poolValue, poolOK := options["pool"]
+		topologyConstrainedPoolsValue, topologyOK := options["topologyConstrainedPools"]
+		if !poolOK {
+			if topologyOK && topologyConstrainedPoolsValue == "" {
+				return status.Error(codes.InvalidArgument, "empty pool name or topologyConstrainedPools to provision volume")
+			} else if !topologyOK {
+				return status.Error(codes.InvalidArgument, "missing or empty pool name to provision volume from")
+			}
+		} else if poolValue == "" {
 			return status.Error(codes.InvalidArgument, "missing or empty pool name to provision volume from")
 		}
-	} else if poolValue == "" {
-		return status.Error(codes.InvalidArgument, "missing or empty pool name to provision volume from")
 	}
 	if value, ok := options["dataPool"]; ok && value == "" {
 		return status.Error(codes.InvalidArgument, "empty datapool name to provision volume from")
@@ -345,6 +349,35 @@ func setClusterTopologyForMultiClusterVolume(
 	return nil
 }
 
+// resolveCredentialsForVolumeID resolves credentials for Delete/Expand operations.
+// For the v1 SC format, req.GetSecrets() is empty because there is no flat
+// csi.storage.k8s.io/provisioner-secret-* in the StorageClass. In that case
+// the clusterID is decoded from volumeID, a PV with that clusterID is found,
+// and the per-cluster provisioner secret is fetched directly from Kubernetes.
+func resolveCredentialsForVolumeID(volumeID string, secrets map[string]string) (*util.Credentials, error) {
+	if len(secrets) > 0 {
+		return util.NewUserCredentialsWithMigration(secrets)
+	}
+	var vi util.CSIIdentifier
+	if err := vi.DecomposeCSIID(volumeID); err != nil {
+		return util.NewUserCredentialsWithMigration(secrets) // will surface "provided secret is empty"
+	}
+	pvAttrs, pvErr := k8s.GetVolumeAttributesForClusterID(vi.ClusterID)
+	if pvErr != nil || pvAttrs == nil {
+		return util.NewUserCredentialsWithMigration(secrets)
+	}
+	ref, isV1, refErr := util.GetProvisionerSecretRefForCluster(pvAttrs, vi.ClusterID)
+	if refErr != nil || !isV1 || ref == nil {
+		return util.NewUserCredentialsWithMigration(secrets)
+	}
+	volSecrets, sErr := k8s.GetSecret(ref.Name, ref.Namespace)
+	if sErr != nil {
+		return nil, fmt.Errorf("failed to get provisioner secret %q/%q for cluster %q: %w",
+			ref.Namespace, ref.Name, vi.ClusterID, sErr)
+	}
+	return util.NewUserCredentialsWithMigration(volSecrets)
+}
+
 // getGRPCErrorForCreateVolume converts the returns the GRPC errors based on
 // the input error types it expected to use only for CreateVolume as we need to
 // return different GRPC codes for different functions based on the input.
@@ -401,7 +434,28 @@ func (cs *ControllerServer) CreateVolume(
 	// TODO: create/get a connection from the ConnPool, and do not pass the
 	// credentials to any of the utility functions.
 
-	cr, err := util.NewUserCredentialsWithMigration(req.GetSecrets())
+	// v1 SC format: per-cluster secrets are embedded in clusterIDs; the external-provisioner
+	// does not populate req.GetSecrets() in this case, so we fetch the secret from K8s directly.
+	v1Info, isV1, v1Err := util.GetClusterInfoByTopologyV1(req.GetParameters(), req.GetAccessibilityRequirements())
+	if v1Err != nil {
+		return nil, status.Error(codes.InvalidArgument, v1Err.Error())
+	}
+
+	var secrets map[string]string
+	if isV1 && v1Info.RBD.ProvisionerSecretRef.Name != "" {
+		var sErr error
+		secrets, sErr = k8s.GetSecret(v1Info.RBD.ProvisionerSecretRef.Name, v1Info.RBD.ProvisionerSecretRef.Namespace)
+		if sErr != nil {
+			return nil, status.Errorf(codes.Internal,
+				"failed to get provisioner secret %q/%q for cluster %q: %v",
+				v1Info.RBD.ProvisionerSecretRef.Namespace, v1Info.RBD.ProvisionerSecretRef.Name,
+				v1Info.ClusterID, sErr)
+		}
+	} else {
+		secrets = req.GetSecrets()
+	}
+
+	cr, err := util.NewUserCredentialsWithMigration(secrets)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -1002,7 +1056,7 @@ func (cs *ControllerServer) DeleteVolume(
 		return nil, status.Error(codes.InvalidArgument, "empty volume ID in request")
 	}
 
-	cr, err := util.NewUserCredentialsWithMigration(req.GetSecrets())
+	cr, err := resolveCredentialsForVolumeID(volumeID, req.GetSecrets())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -1650,7 +1704,7 @@ func (cs *ControllerServer) ControllerExpandVolume(
 	}
 	defer cs.VolumeLocks.Release(volID)
 
-	cr, err := util.NewUserCredentialsWithMigration(req.GetSecrets())
+	cr, err := resolveCredentialsForVolumeID(volID, req.GetSecrets())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}

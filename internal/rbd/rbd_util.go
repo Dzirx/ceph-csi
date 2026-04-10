@@ -1384,36 +1384,59 @@ func genVolFromVolumeOptions(
 
 	rbdVol := &rbdVolume{}
 
-	rbdVol.Pool, ok = volOptions["pool"]
-	if !ok {
-		if _, ok = volOptions["topologyConstrainedPools"]; !ok {
-			return nil, errors.New("empty pool name or topologyConstrainedPools to provision volume")
-		}
+	// v1 SC format: clusterIDs is a YAML/JSON list with per-cluster secrets, pool, and topology.
+	v1Info, isV1, err := util.GetClusterInfoByTopologyV1(volOptions, topologyReq)
+	if err != nil {
+		return nil, err
 	}
 
-	rbdVol.DataPool = volOptions["dataPool"]
 	if namePrefix, ok = volOptions["volumeNamePrefix"]; ok {
 		rbdVol.NamePrefix = namePrefix
 	}
 
-	clusterID, err := util.GetClusterID(volOptions)
-	if err != nil {
-		// Fallback: try topology-based cluster selection
-		clusterID, err = util.GetClusterIDByTopology(volOptions, util.CsiConfigFile, topologyReq)
+	if isV1 {
+		rbdVol.Pool = v1Info.RBD.Pool
+		rbdVol.DataPool = v1Info.RBD.DataPool
+		rbdVol.Topology = v1Info.TopologyDomainLabels
+		if rbdVol.Pool == "" {
+			if _, ok = volOptions["topologyConstrainedPools"]; !ok {
+				return nil, errors.New("empty pool name or topologyConstrainedPools to provision volume")
+			}
+		}
+		rbdVol.Monitors, err = util.Mons(util.CsiConfigFile, v1Info.ClusterID)
+		if err != nil {
+			log.ErrorLog(ctx, "failed getting mons for cluster %s: %s", v1Info.ClusterID, err)
+
+			return nil, err
+		}
+		rbdVol.ClusterID = v1Info.ClusterID
+		rbdVol.RadosNamespace, err = util.GetRBDRadosNamespace(util.CsiConfigFile, rbdVol.ClusterID)
 		if err != nil {
 			return nil, err
 		}
-	}
-	rbdVol.Monitors, rbdVol.ClusterID, err = util.GetMonsAndClusterID(ctx, clusterID, checkClusterIDMapping)
-	if err != nil {
-		log.ErrorLog(ctx, "failed getting mons (%s)", err)
+	} else {
+		rbdVol.Pool, ok = volOptions["pool"]
+		if !ok {
+			if _, ok = volOptions["topologyConstrainedPools"]; !ok {
+				return nil, errors.New("empty pool name or topologyConstrainedPools to provision volume")
+			}
+		}
+		rbdVol.DataPool = volOptions["dataPool"]
 
-		return nil, err
-	}
+		clusterID, cErr := util.GetClusterID(volOptions)
+		if cErr != nil {
+			return nil, cErr
+		}
+		rbdVol.Monitors, rbdVol.ClusterID, err = util.GetMonsAndClusterID(ctx, clusterID, checkClusterIDMapping)
+		if err != nil {
+			log.ErrorLog(ctx, "failed getting mons (%s)", err)
 
-	rbdVol.RadosNamespace, err = util.GetRBDRadosNamespace(util.CsiConfigFile, rbdVol.ClusterID)
-	if err != nil {
-		return nil, err
+			return nil, err
+		}
+		rbdVol.RadosNamespace, err = util.GetRBDRadosNamespace(util.CsiConfigFile, rbdVol.ClusterID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if rbdVol.Mounter, ok = volOptions["mounter"]; !ok {
 		rbdVol.Mounter = rbdDefaultMounter
