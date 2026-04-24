@@ -1,0 +1,27 @@
+---
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: csi-rbdplugin-snapclass-topology
+driver: rbd.csi.ceph.com
+parameters:
+  # (required) v1 clusterIDs format — list of Ceph clusters with per-cluster
+  # snapshotter credentials.
+  # ceph-csi selects the matching cluster automatically from the source
+  # volume's volumeHandle, so a single VolumeSnapshotClass covers all clusters.
+  # Each clusterID must have a corresponding entry in the ceph-csi-config ConfigMap.
+  # If csi.storage.k8s.io/snapshotter-secret-* is omitted, ceph-csi falls back
+  # to csi.storage.k8s.io/provisioner-secret-* from the StorageClass.
+  clusterIDs: |
+    - clusterID: <cluster-id-1>
+      csi.storage.k8s.io/snapshotter-secret-name: csi-rbd-secret
+      csi.storage.k8s.io/snapshotter-secret-namespace: default
+    - clusterID: <cluster-id-2>
+      csi.storage.k8s.io/snapshotter-secret-name: csi-rbd-secret-2
+      csi.storage.k8s.io/snapshotter-secret-namespace: default
+
+  # (optional) Prefix to use for naming RBD snapshots.
+  # If omitted, defaults to "csi-snap-".
+  # snapshotNamePrefix: "foo-bar-"
+
+deletionPolicy: Delete

@@ -1,0 +1,71 @@
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+   name: csi-rbd-sc-topology
+provisioner: rbd.csi.ceph.com
+# Topology-aware provisioning requires delayed binding of PV.
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+   # (required) v1 clusterIDs format — list of Ceph clusters with per-cluster
+   # credentials, pool, and topology zone labels.
+   # ceph-csi selects the cluster whose topologyDomainLabels match the
+   # zone of the node where the workload is scheduled.
+   # Each clusterID must have a corresponding entry in the ceph-csi-config
+   # ConfigMap (monitors only; topology is defined here, not in the ConfigMap).
+   clusterIDs: |
+     - clusterID: <cluster-id-1>
+       csi.storage.k8s.io/provisioner-secret-name: csi-rbd-secret
+       csi.storage.k8s.io/provisioner-secret-namespace: default
+       csi.storage.k8s.io/controller-expand-secret-name: csi-rbd-secret
+       csi.storage.k8s.io/controller-expand-secret-namespace: default
+       csi.storage.k8s.io/node-stage-secret-name: csi-rbd-secret
+       csi.storage.k8s.io/node-stage-secret-namespace: default
+       pool: <rbd-pool-cluster-1>
+       # (optional) erasure-coded data pool; pool above becomes the metadata pool
+       # dataPool: <ec-data-pool-cluster-1>
+       topologyDomainLabels:
+         - topology.rbd.csi.ceph.com/zone: zone-a
+         - topology.rbd.csi.ceph.com/zone: zone-b
+     - clusterID: <cluster-id-2>
+       csi.storage.k8s.io/provisioner-secret-name: csi-rbd-secret-2
+       csi.storage.k8s.io/provisioner-secret-namespace: default
+       csi.storage.k8s.io/controller-expand-secret-name: csi-rbd-secret-2
+       csi.storage.k8s.io/controller-expand-secret-namespace: default
+       csi.storage.k8s.io/node-stage-secret-name: csi-rbd-secret-2
+       csi.storage.k8s.io/node-stage-secret-namespace: default
+       pool: <rbd-pool-cluster-2>
+       topologyDomainLabels:
+         - topology.rbd.csi.ceph.com/zone: zone-c
+
+   # (optional) RBD image features, CSI creates image with image-format 2 CSI
+   # RBD currently supports `layering`, `journaling`, `exclusive-lock`,
+   # `object-map`, `fast-diff`, `deep-flatten` features.
+   # Refer https://docs.ceph.com/en/latest/rbd/rbd-config-ref/#image-features
+   # for image feature dependencies.
+   # imageFeatures: layering,journaling,exclusive-lock,object-map,fast-diff
+   imageFeatures: "layering"
+
+   # (optional) Specify the filesystem type of the volume. If not specified,
+   # csi-provisioner will set default as `ext4`.
+   csi.storage.k8s.io/fstype: ext4
+
+   # (optional) uncomment the following to use rbd-nbd as mounter
+   # on supported nodes
+   # mounter: rbd-nbd
+
+   # (optional) Prefix to use for naming RBD images.
+   # If omitted, defaults to "csi-vol-".
+   # volumeNamePrefix: "foo-bar-"
+
+   # (optional) Instruct the plugin it has to encrypt the volume
+   # By default it is disabled. Valid values are "true" or "false".
+   # A string is expected here, i.e. "true", not true.
+   # encrypted: "true"
+
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+
+# If filesystem is xfs, nouuid will be automatically added to mountOptions
+mountOptions:
+   - discard

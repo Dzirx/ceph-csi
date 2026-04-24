@@ -1,0 +1,64 @@
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: csi-cephfs-sc-topology
+provisioner: cephfs.csi.ceph.com
+# Topology-aware provisioning requires delayed binding of PV.
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  # (required) v1 clusterIDs format — list of Ceph clusters with per-cluster
+  # credentials, filesystem name, and topology zone labels.
+  # ceph-csi selects the cluster whose topologyDomainLabels match the
+  # zone of the node where the workload is scheduled.
+  # Each clusterID must have a corresponding entry in the ceph-csi-config
+  # ConfigMap (monitors only; topology is defined here, not in the ConfigMap).
+  clusterIDs: |
+    - clusterID: <cluster-id-1>
+      csi.storage.k8s.io/provisioner-secret-name: csi-cephfs-secret
+      csi.storage.k8s.io/provisioner-secret-namespace: default
+      csi.storage.k8s.io/controller-expand-secret-name: csi-cephfs-secret
+      csi.storage.k8s.io/controller-expand-secret-namespace: default
+      csi.storage.k8s.io/node-stage-secret-name: csi-cephfs-secret
+      csi.storage.k8s.io/node-stage-secret-namespace: default
+      fsName: <cephfs-name-cluster-1>
+      # (optional) Ceph pool into which volume data shall be stored
+      # pool: <cephfs-data-pool-cluster-1>
+      topologyDomainLabels:
+        - topology.cephfs.csi.ceph.com/zone: zone-a
+        - topology.cephfs.csi.ceph.com/zone: zone-b
+    - clusterID: <cluster-id-2>
+      csi.storage.k8s.io/provisioner-secret-name: csi-cephfs-secret-2
+      csi.storage.k8s.io/provisioner-secret-namespace: default
+      csi.storage.k8s.io/controller-expand-secret-name: csi-cephfs-secret-2
+      csi.storage.k8s.io/controller-expand-secret-namespace: default
+      csi.storage.k8s.io/node-stage-secret-name: csi-cephfs-secret-2
+      csi.storage.k8s.io/node-stage-secret-namespace: default
+      fsName: <cephfs-name-cluster-2>
+      topologyDomainLabels:
+        - topology.cephfs.csi.ceph.com/zone: zone-c
+
+  # (optional) The driver can use either ceph-fuse (fuse) or
+  # ceph kernelclient (kernel).
+  # If omitted, default volume mounter will be used - this is
+  # determined by probing for ceph-fuse and mount.ceph
+  # mounter: kernel
+
+  # (optional) Prefix to use for naming subvolumes.
+  # If omitted, defaults to "csi-vol-".
+  # volumeNamePrefix: "foo-bar-"
+
+  # (optional) Instruct the plugin it has to encrypt the volume
+  # By default it is disabled. Valid values are "true" or "false".
+  # A string is expected here, i.e. "true", not true.
+  # encrypted: "true"
+
+  # (optional) Use external key management system for encryption passphrases by
+  # specifying a unique ID matching KMS ConfigMap. The ID is only used for
+  # correlation to configmap entry.
+  # encryptionKMSID: <kms-config-id>
+
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+# mountOptions:
+#   - context="system_u:object_r:container_file_t:s0:c0,c1"
