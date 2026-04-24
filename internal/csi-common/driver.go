@@ -45,6 +45,12 @@ type CSIDriver struct {
 	vc                []*csi.VolumeCapability_AccessMode
 }
 
+// HasTopology returns true when the driver was started with --domainlabels,
+// meaning topology-aware provisioning is active.
+func (d *CSIDriver) HasTopology() bool {
+	return len(d.topology) > 0
+}
+
 // NewCSIDriver Creates a NewCSIDriver object. Assumes vendor
 // version is equal to driver version &  does not support optional
 // driver plugin info manifest field. Refer to CSI spec for more details.
