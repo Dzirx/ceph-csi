@@ -318,6 +318,7 @@ func buildClusterInfoFromSCEntry(entry kubernetes.SCClusterEntry, zone map[strin
 	ci := kubernetes.ClusterInfo{
 		ClusterID:            entry.ClusterID,
 		TopologyDomainLabels: zone,
+		AllTopologyZones:     entry.TopologyDomainLabels,
 		CephFS: kubernetes.CephFS{
 			FsName: entry.FsName,
 			Pool:   entry.Pool,
@@ -407,6 +408,10 @@ func GetClusterInfoByTopologyV1(
 				out.TopologyDomainLabels[k] = v
 			}
 		}
+		if len(ci.AllTopologyZones) > 0 {
+			out.AllTopologyZones = make([]map[string]string, len(ci.AllTopologyZones))
+			copy(out.AllTopologyZones, ci.AllTopologyZones)
+		}
 		return &out
 	}
 
@@ -449,6 +454,48 @@ func GetProvisionerSecretRefForCluster(options map[string]string, clusterID stri
 	}
 	for _, entry := range entries {
 		if entry.ClusterID == clusterID && entry.ProvisionerSecretName != "" {
+			return &corev1.SecretReference{
+				Name:      entry.ProvisionerSecretName,
+				Namespace: entry.ProvisionerSecretNamespace,
+			}, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// GetSnapshotterSecretRefForCluster returns the snapshotter SecretRef for the
+// given clusterID from the v1 clusterIDs format in the options map.
+// Used for VolumeSnapshotClass v1 format where secrets are embedded in clusterIDs.
+// Prefers SnapshotterSecretName/Namespace; falls back to ProvisionerSecretName/Namespace
+// when the snapshotter-specific fields are absent (same admin credentials).
+// Returns (nil, false, nil) when clusterIDs is absent or not v1 format — caller
+// falls back to the standard Kubernetes-provided secrets.
+// Returns (nil, false, err) on malformed v1 format.
+func GetSnapshotterSecretRefForCluster(options map[string]string, clusterID string) (*corev1.SecretReference, bool, error) {
+	clusterIDsStr, ok := options[ClusterIDsKey]
+	if !ok || clusterIDsStr == "" {
+		return nil, false, nil
+	}
+	entries, isV1, err := parseV1ClusterIDs(clusterIDsStr)
+	if err != nil {
+		return nil, false, err
+	}
+	if !isV1 {
+		return nil, false, nil
+	}
+	for _, entry := range entries {
+		if entry.ClusterID != clusterID {
+			continue
+		}
+		// prefer explicit snapshotter secret
+		if entry.SnapshotterSecretName != "" {
+			return &corev1.SecretReference{
+				Name:      entry.SnapshotterSecretName,
+				Namespace: entry.SnapshotterSecretNamespace,
+			}, true, nil
+		}
+		// fall back to provisioner secret (same admin credentials for Ceph)
+		if entry.ProvisionerSecretName != "" {
 			return &corev1.SecretReference{
 				Name:      entry.ProvisionerSecretName,
 				Namespace: entry.ProvisionerSecretNamespace,

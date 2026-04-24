@@ -69,10 +69,17 @@ func GetVolumeAttributesForClusterID(clusterID string) (map[string]string, error
 		if pv.Spec.CSI == nil {
 			continue
 		}
-		if attrs := pv.Spec.CSI.VolumeAttributes; attrs != nil {
-			if clusterIDs, ok := attrs["clusterIDs"]; ok && strings.Contains(clusterIDs, clusterID) {
-				return attrs, nil
-			}
+		attrs := pv.Spec.CSI.VolumeAttributes
+		if attrs == nil {
+			continue
+		}
+		// New flat format written by CreateVolume after the v1 SC change.
+		if attrs["clusterID"] == clusterID {
+			return attrs, nil
+		}
+		// Legacy: full clusterIDs YAML blob (PVs created before the migration).
+		if clusterIDs, ok := attrs["clusterIDs"]; ok && strings.Contains(clusterIDs, clusterID) {
+			return attrs, nil
 		}
 	}
 

@@ -359,7 +359,21 @@ func resolveNodeStageCredentials(volumeID string, volumeContext, secrets map[str
 		return util.NewUserCredentialsWithMigration(secrets) // will surface "provided secret is empty"
 	}
 	ref, isV1, refErr := util.GetNodeStageSecretRefForCluster(volumeContext, vi.ClusterID)
-	if refErr != nil || !isV1 || ref == nil {
+	if refErr != nil {
+		return util.NewUserCredentialsWithMigration(secrets)
+	}
+	if !isV1 || ref == nil {
+		// Flat format PVs store only provisioner-secret-name in volumeAttributes.
+		// In the v1 SC format the provisioner and node-stage secret are the same.
+		if secretName := volumeContext["csi.storage.k8s.io/provisioner-secret-name"]; secretName != "" {
+			secretNS := volumeContext["csi.storage.k8s.io/provisioner-secret-namespace"]
+			flatSecrets, sErr := k8s.GetSecret(secretName, secretNS)
+			if sErr != nil {
+				return nil, fmt.Errorf("failed to get node-stage secret %q/%q for cluster %q: %w",
+					secretNS, secretName, vi.ClusterID, sErr)
+			}
+			return util.NewUserCredentialsWithMigration(flatSecrets)
+		}
 		return util.NewUserCredentialsWithMigration(secrets)
 	}
 	stageSecrets, sErr := k8s.GetSecret(ref.Name, ref.Namespace)

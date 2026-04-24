@@ -84,6 +84,11 @@ func NewCSIDriver(name, v, nodeID, instance string, enableFencing bool) *CSIDriv
 	return &driver
 }
 
+// GetName returns the name of the CSI driver.
+func (d *CSIDriver) GetName() string {
+	return d.name
+}
+
 // GetInstance returns the instance identification of the CSI driver.
 func (d *CSIDriver) GetInstanceID() string {
 	return d.instance

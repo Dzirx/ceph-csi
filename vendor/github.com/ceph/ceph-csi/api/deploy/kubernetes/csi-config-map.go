@@ -28,6 +28,10 @@ type ClusterInfo struct {
 	// can select this cluster based on the node's topology zone.
 	// Example: {"topology.kubernetes.io/zone": "zone-a"}
 	TopologyDomainLabels map[string]string `json:"topologyDomainLabels,omitempty"`
+	// AllTopologyZones holds all topology zones served by this cluster entry
+	// as resolved from the v1 SC clusterIDs format. Not serialized — populated
+	// at runtime so CreateVolume can set the full AccessibleTopology list.
+	AllTopologyZones []map[string]string `json:"-"`
 	// Monitors is monitor list for corresponding cluster ID
 	Monitors []string `json:"monitors"`
 	// CephFS contains CephFS specific options
@@ -117,6 +121,8 @@ type SCClusterEntry struct {
 	NodeStageSecretNamespace        string              `json:"csi.storage.k8s.io/node-stage-secret-namespace,omitempty"`
 	ControllerExpandSecretName      string              `json:"csi.storage.k8s.io/controller-expand-secret-name,omitempty"`
 	ControllerExpandSecretNamespace string              `json:"csi.storage.k8s.io/controller-expand-secret-namespace,omitempty"`
+	SnapshotterSecretName           string              `json:"csi.storage.k8s.io/snapshotter-secret-name,omitempty"`
+	SnapshotterSecretNamespace      string              `json:"csi.storage.k8s.io/snapshotter-secret-namespace,omitempty"`
 	FsName                          string              `json:"fsName,omitempty"`
 	Pool                            string              `json:"pool,omitempty"`
 	DataPool                        string              `json:"dataPool,omitempty"`

@@ -33,6 +33,7 @@ import (
 	librbd "github.com/ceph/go-ceph/rbd"
 	"github.com/ceph/go-ceph/rbd/admin"
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/cloud-provider/volume/helpers"
 	mount "k8s.io/mount-utils"
@@ -199,6 +200,11 @@ type rbdVolume struct {
 	RequestedVolSize   int64
 	DisableInUseChecks bool
 	readOnly           bool
+	// ProvisionerSecretRef holds the resolved provisioner secret from v1 SC format.
+	ProvisionerSecretRef corev1.SecretReference
+	// AccessibleTopologies holds all topology zones from the matched v1 SC entry,
+	// so CreateVolume can set the full AccessibleTopology list on the PV.
+	AccessibleTopologies []map[string]string
 }
 
 // rbdSnapshot represents a CSI snapshot and its RBD snapshot specifics.
@@ -1410,6 +1416,8 @@ func genVolFromVolumeOptions(
 			return nil, err
 		}
 		rbdVol.ClusterID = v1Info.ClusterID
+		rbdVol.ProvisionerSecretRef = v1Info.RBD.ProvisionerSecretRef
+		rbdVol.AccessibleTopologies = v1Info.AllTopologyZones
 		rbdVol.RadosNamespace, err = util.GetRBDRadosNamespace(util.CsiConfigFile, rbdVol.ClusterID)
 		if err != nil {
 			return nil, err
@@ -1532,7 +1540,13 @@ func genSnapFromOptions(ctx context.Context, rbdVol *rbdVolume, snapOptions map[
 
 	clusterID, err := util.GetClusterID(snapOptions)
 	if err != nil {
-		return nil, err
+		// v1 VolumeSnapshotClass: no "clusterID" key in parameters — use the source
+		// volume's clusterID (already decoded from volumeHandle by the caller).
+		if _, isV1 := snapOptions[util.ClusterIDsKey]; isV1 {
+			clusterID = rbdVol.ClusterID
+		} else {
+			return nil, err
+		}
 	}
 	rbdSnap.Monitors, rbdSnap.ClusterID, err = util.GetMonsAndClusterID(ctx, clusterID, false)
 	if err != nil {

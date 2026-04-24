@@ -292,12 +292,18 @@ func (rbdVol *rbdVolume) ToCSI(ctx context.Context) (*csi.Volume, error) {
 		vol.VolumeContext["dataPool"] = rbdVol.DataPool
 	}
 
-	if rbdVol.Topology != nil {
-		vol.AccessibleTopology = []*csi.Topology{
-			{
-				Segments: rbdVol.Topology,
-			},
+	if len(rbdVol.AccessibleTopologies) > 0 {
+		for _, zone := range rbdVol.AccessibleTopologies {
+			vol.AccessibleTopology = append(vol.AccessibleTopology, &csi.Topology{Segments: zone})
 		}
+	} else if rbdVol.Topology != nil {
+		vol.AccessibleTopology = []*csi.Topology{{Segments: rbdVol.Topology}}
+	}
+
+	if rbdVol.ProvisionerSecretRef.Name != "" {
+		vol.VolumeContext["clusterID"] = rbdVol.ClusterID
+		vol.VolumeContext["csi.storage.k8s.io/provisioner-secret-name"] = rbdVol.ProvisionerSecretRef.Name
+		vol.VolumeContext["csi.storage.k8s.io/provisioner-secret-namespace"] = rbdVol.ProvisionerSecretRef.Namespace
 	}
 
 	return vol, nil
@@ -321,6 +327,9 @@ func buildCreateVolumeResponse(
 	for param, value := range util.GetVolumeContext(req.GetParameters()) {
 		volume.VolumeContext[param] = value
 	}
+	// For v1 SC format the full clusterIDs YAML must not land in the PV —
+	// the selected cluster is already written as flat fields by ToCSI.
+	delete(volume.VolumeContext, util.ClusterIDsKey)
 
 	return &csi.CreateVolumeResponse{Volume: volume}, nil
 }
@@ -350,10 +359,9 @@ func setClusterTopologyForMultiClusterVolume(
 }
 
 // resolveCredentialsForVolumeID resolves credentials for Delete/Expand operations.
-// For the v1 SC format, req.GetSecrets() is empty because there is no flat
-// csi.storage.k8s.io/provisioner-secret-* in the StorageClass. In that case
-// the clusterID is decoded from volumeID, a PV with that clusterID is found,
-// and the per-cluster provisioner secret is fetched directly from Kubernetes.
+// For the v1 SC format, req.GetSecrets() is empty. The exact PV is looked up by
+// volume handle to get provisioner-secret-name from volumeAttributes.
+// Supports both new flat PV format and the legacy clusterIDs YAML format.
 func resolveCredentialsForVolumeID(volumeID string, secrets map[string]string) (*util.Credentials, error) {
 	if len(secrets) > 0 {
 		return util.NewUserCredentialsWithMigration(secrets)
@@ -362,10 +370,32 @@ func resolveCredentialsForVolumeID(volumeID string, secrets map[string]string) (
 	if err := vi.DecomposeCSIID(volumeID); err != nil {
 		return util.NewUserCredentialsWithMigration(secrets) // will surface "provided secret is empty"
 	}
-	pvAttrs, pvErr := k8s.GetVolumeAttributesForClusterID(vi.ClusterID)
-	if pvErr != nil || pvAttrs == nil {
+	// Primary: look up the exact PV being deleted/expanded by its volume handle.
+	pvAttrs, pvErr := k8s.GetVolumeAttributesByVolumeHandle(volumeID)
+	if pvErr != nil {
+		return nil, fmt.Errorf("failed to get PV attributes for volume %q: %w", volumeID, pvErr)
+	}
+	// Fallback: find any PV for the same cluster (e.g. PV already unbound).
+	if pvAttrs == nil {
+		pvAttrs, pvErr = k8s.GetVolumeAttributesForClusterID(vi.ClusterID)
+		if pvErr != nil {
+			return nil, fmt.Errorf("failed to find PV for cluster %q: %w", vi.ClusterID, pvErr)
+		}
+	}
+	if pvAttrs == nil {
 		return util.NewUserCredentialsWithMigration(secrets)
 	}
+	// New flat format: secret name/namespace written directly to PV volumeAttributes.
+	if secretName := pvAttrs["csi.storage.k8s.io/provisioner-secret-name"]; secretName != "" {
+		secretNS := pvAttrs["csi.storage.k8s.io/provisioner-secret-namespace"]
+		volSecrets, sErr := k8s.GetSecret(secretName, secretNS)
+		if sErr != nil {
+			return nil, fmt.Errorf("failed to get provisioner secret %q/%q for cluster %q: %w",
+				secretNS, secretName, vi.ClusterID, sErr)
+		}
+		return util.NewUserCredentialsWithMigration(volSecrets)
+	}
+	// Legacy format: clusterIDs YAML blob embedded in PV volumeAttributes.
 	ref, isV1, refErr := util.GetProvisionerSecretRefForCluster(pvAttrs, vi.ClusterID)
 	if refErr != nil || !isV1 || ref == nil {
 		return util.NewUserCredentialsWithMigration(secrets)
@@ -1248,14 +1278,28 @@ func (cs *ControllerServer) CreateSnapshot(
 		return nil, err
 	}
 
-	cr, err := util.NewUserCredentials(req.GetSecrets())
+	// v1 VolumeSnapshotClass: req.GetSecrets() is empty because there is no top-level
+	// snapshotter-secret in VSC parameters — resolve credentials from the clusterIDs list.
+	snapSecrets := req.GetSecrets()
+	if len(snapSecrets) == 0 {
+		var vi util.CSIIdentifier
+		if decompErr := vi.DecomposeCSIID(req.GetSourceVolumeId()); decompErr == nil {
+			if ref, isV1, refErr := util.GetSnapshotterSecretRefForCluster(req.GetParameters(), vi.ClusterID); refErr == nil && isV1 && ref != nil {
+				if resolved, sErr := k8s.GetSecret(ref.Name, ref.Namespace); sErr == nil {
+					snapSecrets = resolved
+				}
+			}
+		}
+	}
+
+	cr, err := util.NewUserCredentials(snapSecrets)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	defer cr.DeleteCredentials()
 
 	// Fetch source volume information
-	rbdVol, err := GenVolFromVolID(ctx, req.GetSourceVolumeId(), cr, req.GetSecrets())
+	rbdVol, err := GenVolFromVolID(ctx, req.GetSourceVolumeId(), cr, snapSecrets)
 	defer func() {
 		if rbdVol != nil {
 			rbdVol.Destroy(ctx)
@@ -1562,16 +1606,32 @@ func (cs *ControllerServer) DeleteSnapshot(
 		return nil, err
 	}
 
-	cr, err := util.NewUserCredentials(req.GetSecrets())
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-	defer cr.DeleteCredentials()
-
 	snapshotID := req.GetSnapshotId()
 	if snapshotID == "" {
 		return nil, status.Error(codes.InvalidArgument, "snapshot ID cannot be empty")
 	}
+
+	// v1 VolumeSnapshotClass: req.GetSecrets() is empty — resolve snapshotter
+	// credentials by listing VolumeSnapshotClasses for this driver.
+	deleteSecrets := req.GetSecrets()
+	if len(deleteSecrets) == 0 {
+		var vi util.CSIIdentifier
+		if decompErr := vi.DecomposeCSIID(snapshotID); decompErr == nil {
+			if ref, refErr := k8s.GetSnapshotterSecretRefFromVolumeSnapshotClasses(
+				cs.Driver.GetName(), vi.ClusterID, util.GetSnapshotterSecretRefForCluster,
+			); refErr == nil && ref != nil {
+				if resolved, sErr := k8s.GetSecret(ref.Name, ref.Namespace); sErr == nil {
+					deleteSecrets = resolved
+				}
+			}
+		}
+	}
+
+	cr, err := util.NewUserCredentials(deleteSecrets)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	defer cr.DeleteCredentials()
 
 	if acquired := cs.SnapshotLocks.TryAcquire(snapshotID); !acquired {
 		log.ErrorLog(ctx, util.SnapshotOperationAlreadyExistsFmt, snapshotID)
@@ -1588,7 +1648,7 @@ func (cs *ControllerServer) DeleteSnapshot(
 	}
 	defer cs.OperationLocks.ReleaseDeleteLock(snapshotID)
 
-	rbdSnap, err := genSnapFromSnapID(ctx, snapshotID, cr, req.GetSecrets())
+	rbdSnap, err := genSnapFromSnapID(ctx, snapshotID, cr, deleteSecrets)
 	if err != nil {
 		// if error is ErrPoolNotFound, the pool is already deleted we don't
 		// need to worry about deleting snapshot or omap data, return success
