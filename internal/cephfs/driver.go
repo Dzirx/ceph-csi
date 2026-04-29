@@ -175,6 +175,13 @@ func (fs *cephfsDriver) Run(conf *util.Config) {
 	}
 
 	if conf.IsControllerServer {
+		if conf.DomainLabels != "" {
+			topology, err = util.GetTopologyFromDomainLabels(conf.DomainLabels, conf.NodeID, conf.DriverName)
+			if err != nil {
+				log.FatalLogMsg("%v", err.Error())
+			}
+			fs.cd.SetTopology(topology)
+		}
 		fs.cs = NewControllerServer(fs.cd)
 		fs.cs.ClusterName = conf.ClusterName
 		fs.cs.SetMetadata = conf.SetMetadata

@@ -173,6 +173,12 @@ func (d *CSIDriver) AddGroupControllerServiceCapabilities(cl []csi.GroupControll
 	d.groupCapabilities = csc
 }
 
+// SetTopology sets the topology map on the driver (used by controller servers
+// that need to advertise VOLUME_ACCESSIBILITY_CONSTRAINTS).
+func (d *CSIDriver) SetTopology(topology map[string]string) {
+	d.topology = topology
+}
+
 // ValidateGroupControllerServiceRequest validates the group controller
 // plugin capabilities.
 func (d *CSIDriver) ValidateGroupControllerServiceRequest(c csi.GroupControllerServiceCapability_RPC_Type) error {
