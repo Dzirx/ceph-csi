@@ -83,6 +83,9 @@ spec:
             - "--enable-fencing={{ .Values.nodeplugin.fencing }}"
 {{- end }}
             - "--logslowopinterval={{ .Values.logSlowOperationInterval }}"
+{{- range .Values.nodeplugin.plugin.extraArgs }}
+            - "--{{ . }}"
+{{- end }}
           env:
             - name: POD_IP
               valueFrom:

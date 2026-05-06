@@ -141,6 +141,7 @@ nodeplugin:
       tag: canary
       pullPolicy: IfNotPresent
     resources: {}
+    extraArgs: []
 
   nodeSelector: {}
 

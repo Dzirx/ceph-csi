@@ -110,6 +110,9 @@ spec:
             {{- end }}
             - "--setmetadata={{ .Values.provisioner.setmetadata }}"
             - "--logslowopinterval={{ .Values.logSlowOperationInterval }}"
+{{- range .Values.nodeplugin.plugin.extraArgs }}
+            - "--{{ . }}"
+{{- end }}
           env:
             - name: POD_IP
               valueFrom:
