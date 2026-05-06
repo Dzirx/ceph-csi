@@ -98,13 +98,65 @@ func getCredentialsForVolume(
 	return cr, nil
 }
 
+func mergeSecrets(base, override map[string]string) map[string]string {
+	if len(base) == 0 && len(override) == 0 {
+		return nil
+	}
+
+	merged := make(map[string]string, len(base)+len(override))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range override {
+		merged[k] = v
+	}
+
+	return merged
+}
+
+func resolveNodeStageSecretsForCluster(
+	volID fsutil.VolumeID,
+	volContext,
+	volSecrets map[string]string,
+) (map[string]string, error) {
+	if len(volContext) == 0 {
+		return volSecrets, nil
+	}
+
+	var vi util.CSIIdentifier
+	if err := vi.DecomposeCSIID(string(volID)); err != nil {
+		return volSecrets, nil
+	}
+
+	ref, isV1, err := util.GetNodeStageSecretRefForCluster(volContext, vi.ClusterID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve node-stage secret for cluster %q: %w", vi.ClusterID, err)
+	}
+	if !isV1 || ref == nil {
+		return volSecrets, nil
+	}
+
+	nodeSecrets, err := k8s.GetSecret(ref.Name, ref.Namespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get node-stage secret %q/%q for cluster %q: %w",
+			ref.Namespace, ref.Name, vi.ClusterID, err)
+	}
+
+	return mergeSecrets(volSecrets, nodeSecrets), nil
+}
+
 func (ns *NodeServer) getVolumeOptions(
 	ctx context.Context,
 	volID fsutil.VolumeID,
 	volContext,
 	volSecrets map[string]string,
 ) (*store.VolumeOptions, error) {
-	volOptions, _, err := store.NewVolumeOptionsFromVolID(ctx, string(volID), volContext, volSecrets, "", false)
+	resolvedSecrets, err := resolveNodeStageSecretsForCluster(volID, volContext, volSecrets)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	volOptions, _, err := store.NewVolumeOptionsFromVolID(ctx, string(volID), volContext, resolvedSecrets, "", false)
 	if err != nil {
 		if !errors.Is(err, cerrors.ErrInvalidVolID) {
 			return nil, status.Error(codes.Internal, err.Error())

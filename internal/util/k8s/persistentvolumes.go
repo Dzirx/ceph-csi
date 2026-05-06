@@ -100,3 +100,26 @@ func GetPersistentVolume(name string) (*corev1.PersistentVolume, error) {
 
 	return pv, nil
 }
+
+// GetPersistentVolumeByVolumeHandle returns the PersistentVolume object for the
+// given CSI volume handle.
+func GetPersistentVolumeByVolumeHandle(volumeHandle string) (*corev1.PersistentVolume, error) {
+	client, err := NewK8sClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to Kubernetes: %w", err)
+	}
+
+	pvs, err := client.CoreV1().PersistentVolumes().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list persistentvolumes: %w", err)
+	}
+
+	for i := range pvs.Items {
+		pv := &pvs.Items[i]
+		if pv.Spec.CSI != nil && pv.Spec.CSI.VolumeHandle == volumeHandle {
+			return pv, nil
+		}
+	}
+
+	return nil, fmt.Errorf("failed to find persistentvolume with volume handle %q", volumeHandle)
+}
